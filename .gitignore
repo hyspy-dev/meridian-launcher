@@ -1,0 +1,16 @@
+target/
+dependency-reduced-pom.xml
+*.class
+*.log
+*.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# JVM crash logs
+hs_err_pid*
