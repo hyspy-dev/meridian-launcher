@@ -35,11 +35,14 @@ import meridian.launcher.auth.SessionProvider;
 import meridian.launcher.capture.CaptureProxy;
 import meridian.launcher.capture.HytaleBackends;
 import meridian.launcher.discovery.ListingsParamCapture;
+import meridian.launcher.discovery.RouteRegistry;
+import meridian.launcher.discovery.ServerDiscoveryRewriter;
 import meridian.launcher.discovery.ServerParams;
 import meridian.launcher.discovery.ServerParamsStore;
 import meridian.launcher.launch.GameLauncher;
 import meridian.launcher.launch.HytaleInstall;
 import meridian.launcher.launch.HytaleRoot;
+import meridian.launcher.launch.ProxyLauncher;
 import meridian.launcher.mitm.CertificateAuthority;
 import meridian.launcher.mitm.ExchangeHandler;
 import meridian.launcher.mitm.MitmProxy;
@@ -73,12 +76,15 @@ public final class LauncherWindow {
     private JTextField clientField;              // the Hytale root folder
     private javax.swing.JComboBox<String> versionBox;
     private JPanel versionRow;
+    private javax.swing.JComboBox<ProxyItem> proxyBox;
+    private javax.swing.JCheckBox useProxyCheck;
     private javax.swing.JCheckBox blockTelemetryCheck;
     private JButton launchButton;
     private ServersPanel serversPanel;
 
     private final meridian.launcher.Settings settings = meridian.launcher.Settings.defaultSettings();
     private static final String PREF_BLOCK_TELEMETRY = "blockTelemetry";
+    private static final String PREF_USE_PROXY = "useProxy";
     private JTextArea log;
 
     private volatile boolean busy;
@@ -94,8 +100,20 @@ public final class LauncherWindow {
 
         @Override
         public String toString() {
-            boolean live = account().hasValidSessionFor(profileUuid());
-            return row.label() + (live ? "" : "  (needs refresh)");
+            // Launch-ready when there is a valid session OR a refresh token to mint from (the
+            // session is refreshed on launch, and the profile list is refreshed on open). Only a
+            // missing refresh token truly needs an interactive re-login.
+            boolean launchReady = account().refreshToken != null
+                    || account().hasValidSessionFor(profileUuid());
+            return row.label() + (launchReady ? "" : "  (needs login)");
+        }
+    }
+
+    /** Combo entry for a proxy jar found next to the launcher; label is the file name. */
+    private record ProxyItem(java.nio.file.Path jar) {
+        @Override
+        public String toString() {
+            return jar == null ? "(no proxy jar found)" : jar.getFileName().toString();
         }
     }
 
@@ -133,9 +151,27 @@ public final class LauncherWindow {
             return inst == null ? null : HytaleRoot.gameVersion(inst.root, inst.version);
         }, this::installedGameVersions);
 
+        // The native Windows tab painter ignores our colors (renders light tabs on the dark
+        // window). Feed the dark palette to the Basic tab defaults and force the Basic UI so
+        // they're actually used.
+        UIManager.put("TabbedPane.selected", BG);
+        UIManager.put("TabbedPane.background", BAR);
+        UIManager.put("TabbedPane.foreground", FG);
+        UIManager.put("TabbedPane.contentAreaColor", BG);
+        UIManager.put("TabbedPane.darkShadow", BG);
+        UIManager.put("TabbedPane.shadow", BAR);
+        UIManager.put("TabbedPane.light", BAR);
+        UIManager.put("TabbedPane.highlight", BAR);
+        UIManager.put("TabbedPane.focus", FG);
+        UIManager.put("TabbedPane.borderHightlightColor", ACCENT);
+        UIManager.put("TabbedPane.tabAreaBackground", BG);
+        UIManager.put("TabbedPane.contentBorderInsets", new Insets(2, 0, 0, 0));
+
         javax.swing.JTabbedPane tabs = new javax.swing.JTabbedPane();
-        tabs.setBackground(BG);
+        tabs.setUI(new javax.swing.plaf.basic.BasicTabbedPaneUI());
+        tabs.setBackground(BAR);
         tabs.setForeground(FG);
+        tabs.setBorder(BorderFactory.createEmptyBorder());
         tabs.addTab("Launch", launchTab);
         tabs.addTab("Servers", serversPanel);
         tabs.addChangeListener(e -> {
@@ -151,8 +187,28 @@ public final class LauncherWindow {
 
         // Show stored accounts and installed versions without forcing any login or mint.
         reloadVersions();
+        reloadProxies();
         reloadAccounts();
         refreshProfilesOnOpen();
+    }
+
+    /** Fills the proxy dropdown from jars next to the launcher; enabled with "Use proxy". */
+    private void reloadProxies() {
+        if (proxyBox == null) return;
+        var model = new javax.swing.DefaultComboBoxModel<ProxyItem>();
+        java.util.List<java.nio.file.Path> jars = meridian.launcher.launch.ProxyLauncher.findProxyJars();
+        if (jars.isEmpty()) {
+            model.addElement(new ProxyItem(null));
+        } else {
+            for (java.nio.file.Path j : jars) model.addElement(new ProxyItem(j));
+        }
+        proxyBox.setModel(model);
+        proxyBox.setEnabled(useProxyCheck != null && useProxyCheck.isSelected());
+    }
+
+    private java.nio.file.Path selectedProxyJar() {
+        ProxyItem item = proxyBox == null ? null : (ProxyItem) proxyBox.getSelectedItem();
+        return item == null ? null : item.jar();
     }
 
     /**
@@ -301,6 +357,16 @@ public final class LauncherWindow {
         versionRow.add(versionLabel);
         versionRow.add(versionBox);
         versionRow.add(saveVersionButton);
+
+        JLabel proxyLabel = new JLabel("Proxy:");
+        proxyLabel.setForeground(FG);
+        proxyLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        proxyBox = new javax.swing.JComboBox<>();
+        proxyBox.setPrototypeDisplayValue(new ProxyItem(java.nio.file.Path.of("meridian-proxy-x.y.z-all.jar")));
+        proxyBox.setToolTipText("Meridian proxy jar to run (found next to the launcher)");
+        versionRow.add(Box.createHorizontalStrut(12));
+        versionRow.add(proxyLabel);
+        versionRow.add(proxyBox);
         this.versionRow = versionRow;
 
         // Account row: pick which account to launch, add another, or remove one.
@@ -356,6 +422,21 @@ public final class LauncherWindow {
                 persistFlag(PREF_BLOCK_TELEMETRY, blockTelemetryCheck.isSelected()));
         buttons.add(Box.createHorizontalStrut(12));
         buttons.add(blockTelemetryCheck);
+
+        useProxyCheck = new javax.swing.JCheckBox("Use proxy");
+        useProxyCheck.setOpaque(false);
+        useProxyCheck.setForeground(FG);
+        useProxyCheck.setFocusPainted(false);
+        useProxyCheck.setToolTipText("Route the game's servers through the Meridian proxy: the"
+                + " in-game server list is rewritten to the local proxy, which relays to the real"
+                + " servers. Starts the selected proxy jar on launch.");
+        useProxyCheck.setSelected(settings.getBool(PREF_USE_PROXY, false));
+        useProxyCheck.addActionListener(e -> {
+            persistFlag(PREF_USE_PROXY, useProxyCheck.isSelected());
+            if (proxyBox != null) proxyBox.setEnabled(useProxyCheck.isSelected());
+        });
+        buttons.add(Box.createHorizontalStrut(12));
+        buttons.add(useProxyCheck);
 
         south.add(accountRow);
         south.add(versionRow);
@@ -519,17 +600,25 @@ public final class LauncherWindow {
             return;
         }
         boolean blockTelemetry = blockTelemetryCheck.isSelected();
+        boolean useProxy = useProxyCheck.isSelected();
+        Path proxyJar = selectedProxyJar();
         String gv = HytaleRoot.gameVersion(install.root, install.version);
         final String version = gv != null ? gv : install.version;
+        if (useProxy && proxyJar == null) {
+            append("Use proxy is on but no proxy jar was found next to the launcher — "
+                    + "drop a meridian-proxy-*-all.jar there, or turn off Use proxy.");
+            return;
+        }
         setBusy(true, "Preparing " + item.username() + "…");
         Thread.startVirtualThread(() -> {
             // A per-launch proxy lives as long as the game window and is closed on exit.
-            // Two modes: MITM (auto-capture this version's server params, first time) or a
-            // plain CONNECT-block proxy (telemetry only). Null when neither is needed.
+            // Modes: proxy (rewrite the server list to a local multiplex proxy), auto-capture
+            // (first run of a version), or a plain CONNECT-block proxy (telemetry). Null if none.
             AutoCloseable proxy = null;
             CertificateAuthority captureCa = null;
             boolean caWeInstalled = false;
             boolean capturing = false;
+            Process proxyProcess = null;
             try {
                 // Reuses the stored token when still valid, so launching another window
                 // of the same account does not invalidate the ones already open.
@@ -541,7 +630,33 @@ public final class LauncherWindow {
                 capturing = params == null || !params.isComplete();
 
                 Map<String, String> env = Map.of();
-                if (capturing) {
+                if (useProxy) {
+                    // Redirect gameplay UDP: MITM server-discovery to rewrite every listing to
+                    // 127.0.0.1:<localPort>, record port→realServer in a routes file, and run the
+                    // proxy in multiplex mode over that file. The game Direct-Connects to loopback
+                    // and its QUIC flows through the proxy, which relays to the real server.
+                    Path caDir = meridian.launcher.AppPaths.resolve("ca");
+                    captureCa = CertificateAuthority.loadOrCreate(caDir);
+                    if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(captureCa.caCertificate())) {
+                        WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
+                        caWeInstalled = true;
+                    }
+                    RouteRegistry routes = RouteRegistry.create(meridian.launcher.AppPaths.resolve("proxy-routes.txt"));
+                    proxyProcess = ProxyLauncher.startMultiplex(proxyJar, routes.routesFile(), s.sessionToken);
+                    Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
+                    handlers.put("server-discovery.hytale.com", new ServerDiscoveryRewriter(store, routes));
+                    java.util.Set<String> block = blockTelemetry ? HytaleBackends.TELEMETRY : java.util.Set.of();
+                    MitmProxy mitm = new MitmProxy(0, captureCa, java.util.Set.of(), handlers, block);
+                    mitm.start();
+                    proxy = mitm;
+                    env = proxyEnv("http://127.0.0.1:" + mitm.port());
+                    if (!WindowsCaTrust.isWindows()) {
+                        env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
+                    }
+                    appendAsync("Proxy ON — " + proxyJar.getFileName() + " (multiplex); the in-game"
+                            + " server list is redirected through it"
+                            + (blockTelemetry ? "; telemetry blocked." : "."));
+                } else if (capturing) {
                     // First launch of this version: capture its server-discovery params
                     // (protocolVersion + clientSeed) so it becomes browsable in the Servers tab.
                     Path caDir = meridian.launcher.AppPaths.resolve("ca");
@@ -579,7 +694,7 @@ public final class LauncherWindow {
                 setBusyAsync(false, null);
                 int code = p.waitFor();
                 appendAsync("Client (" + s.profileUsername + ") exited with code " + code + ".");
-                if (capturing) {
+                if (capturing && !useProxy) {
                     ServerParams got = store.get(version);
                     if (got != null && got.isComplete()) {
                         appendAsync("Captured server params for " + version + " — it's now in the Servers tab.");
@@ -596,6 +711,9 @@ public final class LauncherWindow {
                 appendAsync("Launch failed: " + e.getMessage());
                 setBusyAsync(false, null);
             } finally {
+                if (proxyProcess != null && proxyProcess.isAlive()) {
+                    proxyProcess.destroy();   // stop the multiplex proxy when the game exits
+                }
                 if (proxy != null) {
                     try { proxy.close(); } catch (Exception ignored) { }
                 }

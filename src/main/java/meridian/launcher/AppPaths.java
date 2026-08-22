@@ -31,6 +31,18 @@ public final class AppPaths {
         return BASE.resolve(child);
     }
 
+    /**
+     * The directory the launcher jar lives in (where sibling artifacts like the proxy jar are
+     * looked up). Falls back to the data base, then the working directory, if unknown.
+     */
+    public static Path launcherDir() {
+        Path dir = jarDir();
+        if (dir != null) {
+            return dir.toAbsolutePath().normalize();
+        }
+        return BASE;
+    }
+
     private static Path resolveBase() {
         Path jarDir = jarDir();
         if (jarDir != null) {
