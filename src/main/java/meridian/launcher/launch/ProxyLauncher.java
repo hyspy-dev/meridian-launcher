@@ -42,30 +42,25 @@ public final class ProxyLauncher {
     }
 
     /**
-     * Starts {@code proxyJar} in multiplex mode: it binds the ports listed in {@code routesFile}
-     * (and watches it for more) and relays each to its real server, authenticating with the
-     * player {@code sessionToken}. Returns the process; the caller owns it (kill on game exit).
+     * Starts {@code proxyJar} in multiplex mode. It binds nothing until the launcher drives it
+     * over the returned process's stdin (see {@link ProxyControl}): {@code TOKEN}/{@code ROUTE}
+     * commands. Returns the process; the caller owns it (control + kill on game exit). No
+     * {@code --no-gui}, so the proxy shows its normal window (same UI as standalone).
      */
-    public static Process startMultiplex(Path proxyJar, Path routesFile, String sessionToken)
-            throws IOException {
+    public static Process startMultiplex(Path proxyJar) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(javaExec());
         cmd.add("-jar");
         cmd.add(proxyJar.toString());
-        // No --no-gui: the proxy shows its own log window so the user can watch connections.
-        cmd.add("--routes");
-        cmd.add(routesFile.toString());
-        if (sessionToken != null && !sessionToken.isBlank()) {
-            cmd.add("--session-token");
-            cmd.add(sessionToken);
-        }
+        cmd.add("--multiplex");
         ProcessBuilder pb = new ProcessBuilder(cmd);
         Path parent = proxyJar.getParent();
         if (parent != null) {
             pb.directory(parent.toFile());
         }
-        pb.redirectErrorStream(true);
-        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);   // proxy logs to its own console/GUI normally
+        pb.redirectInput(ProcessBuilder.Redirect.PIPE);       // we drive it via stdin
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);   // proxy logs to its own window
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
         return pb.start();
     }
 

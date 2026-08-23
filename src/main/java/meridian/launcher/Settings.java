@@ -32,20 +32,33 @@ public final class Settings {
     }
 
     public synchronized boolean getBool(String key, boolean def) {
-        Boolean v = load().get(key);
-        return v != null ? v : def;
+        Object v = load().get(key);
+        return v instanceof Boolean b ? b : def;
     }
 
     public synchronized void setBool(String key, boolean value) {
-        Map<String, Boolean> all = load();
+        put(key, value);
+    }
+
+    public synchronized String getString(String key, String def) {
+        Object v = load().get(key);
+        return v instanceof String s ? s : def;
+    }
+
+    public synchronized void setString(String key, String value) {
+        put(key, value);
+    }
+
+    private void put(String key, Object value) {
+        Map<String, Object> all = load();
         all.put(key, value);
         save(all);
     }
 
-    private Map<String, Boolean> load() {
+    private Map<String, Object> load() {
         if (Files.exists(file)) {
             try (Reader r = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-                Map<String, Boolean> onDisk = GSON.fromJson(r, DiskShape.class);
+                Map<String, Object> onDisk = GSON.fromJson(r, DiskShape.class);
                 if (onDisk != null) {
                     return onDisk;
                 }
@@ -56,7 +69,7 @@ public final class Settings {
         return new LinkedHashMap<>();
     }
 
-    private void save(Map<String, Boolean> all) {
+    private void save(Map<String, Object> all) {
         try {
             Files.createDirectories(file.getParent());
             try (Writer w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
@@ -67,7 +80,7 @@ public final class Settings {
         }
     }
 
-    /** Gson reifiable type for {@code Map<String, Boolean>}. */
-    private static final class DiskShape extends LinkedHashMap<String, Boolean> {
+    /** Gson reifiable type for the on-disk map (bools + strings). */
+    private static final class DiskShape extends LinkedHashMap<String, Object> {
     }
 }

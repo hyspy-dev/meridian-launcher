@@ -619,6 +619,7 @@ public final class LauncherWindow {
             boolean caWeInstalled = false;
             boolean capturing = false;
             Process proxyProcess = null;
+            meridian.launcher.launch.ProxyControl proxyControl = null;
             try {
                 // Reuses the stored token when still valid, so launching another window
                 // of the same account does not invalidate the ones already open.
@@ -641,8 +642,12 @@ public final class LauncherWindow {
                         WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
                         caWeInstalled = true;
                     }
-                    RouteRegistry routes = RouteRegistry.create(meridian.launcher.AppPaths.resolve("proxy-routes.txt"));
-                    proxyProcess = ProxyLauncher.startMultiplex(proxyJar, routes.routesFile(), s.sessionToken);
+                    proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
+                    // Drive the proxy over its stdin (a parent→child pipe, not files): hand it the
+                    // player token, and announce a route for each server as the listing is rewritten.
+                    proxyControl = new meridian.launcher.launch.ProxyControl(proxyProcess.getOutputStream());
+                    proxyControl.token(s.sessionToken);
+                    RouteRegistry routes = RouteRegistry.create(proxyControl::route);
                     Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
                     handlers.put("server-discovery.hytale.com", new ServerDiscoveryRewriter(store, routes));
                     java.util.Set<String> block = blockTelemetry ? HytaleBackends.TELEMETRY : java.util.Set.of();
@@ -711,6 +716,9 @@ public final class LauncherWindow {
                 appendAsync("Launch failed: " + e.getMessage());
                 setBusyAsync(false, null);
             } finally {
+                if (proxyControl != null) {
+                    proxyControl.close();     // close the stdin control pipe
+                }
                 if (proxyProcess != null && proxyProcess.isAlive()) {
                     proxyProcess.destroy();   // stop the multiplex proxy when the game exits
                 }
