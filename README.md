@@ -17,9 +17,14 @@ client (`hytale-monitor`).
   there is nothing to refresh.
 - **Mint** — `get-launcher-data` → first profile → `game-session/new`, yielding the
   `sessionToken` + `identityToken` the client needs.
-- **Persist** — store the session (owner-only) at
-  `~/.meridian/launcher-session.json`, so login is a one-time step.
+- **Persist** — store accounts (owner-only) in `accounts.json`, so login is a one-time
+  step. Everything the launcher writes — accounts, captured server params, the MITM CA,
+  settings — lives in a `meridian/` folder **next to the launcher jar**, not the home dir
+  and **not the registry**; delete the jar's folder and nothing is left behind.
 - **Launch** — start the client with the session in its environment.
+
+Beyond Part 1, the launcher now also drives the proxy so the whole in-game server browser
+routes through it automatically — see **[docs/server-redirect.md](docs/server-redirect.md)**.
 
 ## The launch contract
 
@@ -52,9 +57,12 @@ them "from environment" — so both the client and its server authenticate off o
 
 ## Accounts & token sharing
 
-The launcher stores several **accounts** (`~/.meridian/accounts.json`, owner-only) so any
-of them starts in a couple of clicks — pick one from the dropdown (or `--account NAME`) and
-Launch. "Account" is the login, not the in-game profile.
+The launcher stores several **accounts** (`accounts.json` next to the jar, owner-only) so
+any of them starts in a couple of clicks — pick one from the dropdown (or `--account NAME`)
+and Launch. "Account" is the login; one account can hold several in-game **profiles**
+(distinct `{uuid, username}`), each shown as its own row in the dropdown. On open, the
+launcher refreshes each account's profile list from the account service where the stored
+refresh token still works — so newly added/renamed profiles appear without re-adding.
 
 Hytale allows one active session per account, and **minting** (`game-session/new`)
 invalidates the account's other live sessions. The game never mints on its own — it uses
@@ -74,12 +82,18 @@ first's live token instead of minting a new one that would evict it.
 java -jar meridian-launcher-*.jar <command>
 
   gui                            open the window (default)
-  accounts                       list stored accounts
+  accounts                       list stored accounts (with their profiles)
   login                          add an account (interactive sign-in)
   session [--account NAME]       return a usable session (reuse/refresh), print a summary
-  launch  [--account NAME] [--client PATH]   start the client for an account
+  launch  [--account NAME] [--hytale ROOT] [--version NAME]   start the client
+  servers [--sort featured|random|favorite] [--version V]     list servers (no game launch)
+  capture-params [--version NAME]   capture a version's server-list params (one launch)
   logout  [--account NAME]       remove an account
 ```
+
+The GUI has two tabs — **Launch** (account/profile, version, proxy jar, Use proxy / Block
+telemetry, Launch) and **Servers** (browse Featured / Random / Favorites per captured
+version).
 
 The client path is auto-detected, with `--client <path>` or `-Dmeridian.client=<path>`
 as the override.
@@ -105,11 +119,18 @@ CLI selectors: `--hytale <root> --version <name>` (or `--client <exe>` to point 
 at an executable). Verified against a real install on Windows; macOS/Linux use the
 equivalent `Application Support` / `~/.local/share` roots (best-effort).
 
-## Server target
+## Server redirect (Use proxy)
 
 The launch arguments carry no server address — the client reaches multiplayer through its
-own Direct Connect UI. So with the proxy, the player still Direct-Connects to `localhost`,
-exactly as today; the launcher's job is to get the game signed in, not to route it.
+own Direct Connect UI and the **server browser**. So rather than route a single server, the
+launcher routes the **whole browser**: tick **Use proxy**, pick a proxy jar (found next to
+the launcher), and Launch. The launcher rewrites the in-game server list so every server
+points at a local **multiplex proxy**, and drives that proxy over its stdin. You just pick a
+server in-game — its gameplay UDP flows through the proxy automatically.
+
+Full mechanism, manual servers, and token handling: **[docs/server-redirect.md](docs/server-redirect.md)**.
+Servers not in the browser are handled in the proxy's own Connect bar (Direct-Connect to
+`localhost`), the same UI as running the proxy standalone.
 
 ## Part 2 — telemetry / server list
 
@@ -139,12 +160,19 @@ java -jar meridian-launcher-*.jar play --block host1,host2    # block an explici
 java -jar meridian-launcher-*.jar capture                     # route through, block nothing (recon)
 ```
 
-**Server list / community servers — Stage B, MITM built; pinning test pending.**
-Injecting into the server browser means decrypting `server-discovery.hytale.com` (read its
-response, add servers). The MITM is built and verified locally: a local CA
-(`~/.meridian/ca`, BouncyCastle), a per-host leaf minted on the fly, TLS terminated with
-that leaf, the plaintext HTTP relayed to the real server. Whether it works against the
-real client depends on whether that host pins — tested with `probe`:
+**Server list — browsable, and routable.** `server-discovery.hytale.com` is interceptable
+(confirmed — the real client trusts our CA, it does not pin). Two things build on that:
+
+- The launcher can **read the browser itself** — a **Servers** tab lists Featured / Random /
+  Favorites for a captured game version, using your minted token, *without launching the
+  game*. The build-bound params (`protocolVersion` / `clientSeed`) are captured on first
+  launch of a version (or via `capture-params`) and cached next to the jar.
+- With **Use proxy**, the launcher **rewrites** that same response so gameplay routes through
+  the proxy — see **[docs/server-redirect.md](docs/server-redirect.md)**.
+
+The MITM under both is the same: a local CA (in the launcher's folder, BouncyCastle), a
+per-host leaf minted on the fly, TLS terminated with that leaf, the plaintext HTTP relayed
+(and optionally rewritten). You can still probe a host's pinning directly:
 
 ```bash
 java -jar meridian-launcher-*.jar probe          # server-discovery + mod-browser
