@@ -396,14 +396,14 @@ public final class ServersPanel extends JPanel {
         ServerParams params = null;
         if (sort != ServerDiscoveryClient.Sort.FAVORITE) {
             if (version == null) {
-                setStatus(RED, "No captured versions yet — launch a version once (capture-params) to browse it.");
+                setStatus(RED, "No captured versions yet — launch a version with proxy once to browse it.");
                 model.setRowCount(0);
                 return;
             }
             params = store.get(version);
             String missing = missingParam(sort, params);
             if (missing != null) {
-                setStatus(RED, "No " + missing + " cached for " + version + " — run capture-params for it.");
+                setStatus(RED, "No " + missing + " cached for " + version + " — launch game with proxy once.");
                 model.setRowCount(0);
                 return;
             }
@@ -420,7 +420,7 @@ public final class ServersPanel extends JPanel {
                 SwingUtilities.invokeLater(() -> {
                     populate(listings);   // sets allListings + applies search filter + count status
                     if (listings.isEmpty()) {
-                        setStatus(MUTED, "0 servers — nothing here (params stale? re-run capture-params)");
+                        setStatus(MUTED, "0 servers — nothing here (params stale? launch game with proxy once)");
                     }
                     setBusy(false);
                 });
