@@ -26,6 +26,8 @@ public final class GameLauncher {
     public static final String ENV_SESSION_TOKEN = "HYTALE_SESSION_TOKEN";
     /** Environment variable the client reads its identity token from. */
     public static final String ENV_IDENTITY_TOKEN = "HYTALE_IDENTITY_TOKEN";
+    /** Environment variable the client reads the singleplayer offline token from (best-effort). */
+    public static final String ENV_OFFLINE_TOKEN = "HYTALE_OFFLINE_TOKEN";
 
     private final HytaleInstall install;
 
@@ -76,6 +78,9 @@ public final class GameLauncher {
         Map<String, String> env = pb.environment();
         env.put(ENV_SESSION_TOKEN, session.sessionToken);
         env.put(ENV_IDENTITY_TOKEN, session.identityToken);
+        if (session.offlineToken != null && !session.offlineToken.isBlank()) {
+            env.put(ENV_OFFLINE_TOKEN, session.offlineToken);
+        }
         env.putAll(extraEnv);
 
         log.info("Launching {} as {} ({}), version {}",

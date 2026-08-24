@@ -34,10 +34,8 @@ import meridian.launcher.auth.GameSession;
 import meridian.launcher.auth.SessionProvider;
 import meridian.launcher.capture.CaptureProxy;
 import meridian.launcher.capture.HytaleBackends;
-import meridian.launcher.discovery.ListingsParamCapture;
 import meridian.launcher.discovery.RouteRegistry;
 import meridian.launcher.discovery.ServerDiscoveryRewriter;
-import meridian.launcher.discovery.ServerParams;
 import meridian.launcher.discovery.ServerParamsStore;
 import meridian.launcher.launch.GameLauncher;
 import meridian.launcher.launch.HytaleInstall;
@@ -75,16 +73,33 @@ public final class LauncherWindow {
     private JButton removeAccountButton;
     private JTextField clientField;              // the Hytale root folder
     private javax.swing.JComboBox<String> versionBox;
-    private JPanel versionRow;
     private javax.swing.JComboBox<ProxyItem> proxyBox;
     private javax.swing.JCheckBox useProxyCheck;
     private javax.swing.JCheckBox blockTelemetryCheck;
+    private javax.swing.JCheckBox logRequestsCheck;
+
+    // Shared across concurrent game windows: the Meridian CA is trusted for as long as any window
+    // is using it, and uninstalled only when the LAST such window exits (not the first to close).
+    private final java.util.concurrent.atomic.AtomicInteger caUsers = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile boolean caInstalledByUs;
+    // Dedicated append-only file for "Log all HTTPS requests" — the launcher's own slf4j-simple
+    // output goes to stderr, which is invisible for a GUI (javaw) process.
+    private java.io.PrintWriter httpRequestLog;
+    private final Object httpRequestLogLock = new Object();
     private JButton launchButton;
+    private JButton updateButton;
+    private JLabel updateToLabel;
+    private JPanel installListCell;           // grid cell #3: inline install list (blank when idle)
+    private final java.util.Map<String, meridian.launcher.update.UpdateClient.Patchline> patchlineCache
+            = new java.util.HashMap<>();
+    private volatile boolean patchlinesFetching;
+    private String patchlineAccount;          // account id the patchline cache was fetched for
     private ServersPanel serversPanel;
 
     private final meridian.launcher.Settings settings = meridian.launcher.Settings.defaultSettings();
     private static final String PREF_BLOCK_TELEMETRY = "blockTelemetry";
     private static final String PREF_USE_PROXY = "useProxy";
+    private static final String PREF_LOG_REQUESTS = "logHttpsRequests";
     private JTextArea log;
 
     private volatile boolean busy;
@@ -127,53 +142,49 @@ public final class LauncherWindow {
         SwingUtilities.invokeLater(() -> new LauncherWindow().build());
     }
 
-    private void build() {
+    /** Installs the FlatLaf dark look-and-feel (flat, cohesive) with a couple of rounding tweaks. */
+    private void applyTheme() {
         try {
-            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (Exception ignored) {
+            com.formdev.flatlaf.FlatDarkLaf.setup();
+            UIManager.put("Component.arc", 8);
+            UIManager.put("Button.arc", 8);
+            UIManager.put("TextComponent.arc", 6);
+            UIManager.put("Component.focusWidth", 1);
+            UIManager.put("ScrollBar.thumbArc", 999);
+            UIManager.put("ScrollBar.thumbInsets", new Insets(2, 2, 2, 2));
+            UIManager.put("TitledBorder.titleColor", MUTED);
+        } catch (Throwable t) {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception ignored) {
+            }
         }
+    }
+
+    private void build() {
+        applyTheme();
 
         frame = new JFrame("Meridian Launcher");
         frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-        frame.setSize(900, 640);
-        frame.setMinimumSize(new Dimension(760, 540));
+        frame.setSize(1000, 680);
+        frame.setMinimumSize(new Dimension(840, 560));
         frame.setLocationByPlatform(true);
 
         JPanel launchTab = new JPanel(new BorderLayout());
         launchTab.setBackground(BG);
-        launchTab.setBorder(BorderFactory.createEmptyBorder(14, 16, 14, 16));
-        launchTab.add(buildHeader(), BorderLayout.NORTH);
-        launchTab.add(buildLogArea(), BorderLayout.CENTER);
-        launchTab.add(buildActions(), BorderLayout.SOUTH);
+        launchTab.setBorder(BorderFactory.createEmptyBorder(10, 16, 12, 16));
+        launchTab.add(buildGrid(), BorderLayout.CENTER);
+        launchTab.add(buildBottom(), BorderLayout.SOUTH);   // console + a slim status footer
 
         serversPanel = new ServersPanel(provider, this::openBrowser, () -> {
             HytaleInstall inst = selectedInstall();
             return inst == null ? null : HytaleRoot.gameVersion(inst.root, inst.version);
         }, this::installedGameVersions);
 
-        // The native Windows tab painter ignores our colors (renders light tabs on the dark
-        // window). Feed the dark palette to the Basic tab defaults and force the Basic UI so
-        // they're actually used.
-        UIManager.put("TabbedPane.selected", BG);
-        UIManager.put("TabbedPane.background", BAR);
-        UIManager.put("TabbedPane.foreground", FG);
-        UIManager.put("TabbedPane.contentAreaColor", BG);
-        UIManager.put("TabbedPane.darkShadow", BG);
-        UIManager.put("TabbedPane.shadow", BAR);
-        UIManager.put("TabbedPane.light", BAR);
-        UIManager.put("TabbedPane.highlight", BAR);
-        UIManager.put("TabbedPane.focus", FG);
-        UIManager.put("TabbedPane.borderHightlightColor", ACCENT);
-        UIManager.put("TabbedPane.tabAreaBackground", BG);
-        UIManager.put("TabbedPane.contentBorderInsets", new Insets(2, 0, 0, 0));
-
         javax.swing.JTabbedPane tabs = new javax.swing.JTabbedPane();
-        tabs.setUI(new javax.swing.plaf.basic.BasicTabbedPaneUI());
-        tabs.setBackground(BAR);
-        tabs.setForeground(FG);
-        tabs.setBorder(BorderFactory.createEmptyBorder());
         tabs.addTab("Launch", launchTab);
         tabs.addTab("Servers", serversPanel);
+        tabs.addTab("Tools", new ToolsPanel(provider, this::openBrowser));
         tabs.addChangeListener(e -> {
             if (tabs.getSelectedComponent() == serversPanel) {
                 serversPanel.ensureLoaded();
@@ -227,6 +238,9 @@ public final class LauncherWindow {
                             + (changed == 1 ? " account." : " accounts."));
                     SwingUtilities.invokeLater(this::reloadAccounts);
                 }
+                // Serialized after the profile refresh (so the two token refreshes don't race):
+                // pull patchlines and reveal the Update row if the selected version can update.
+                SwingUtilities.invokeLater(this::refreshUpdateRow);
             } catch (Exception ignored) {
                 // best-effort; the stored profiles remain shown
             }
@@ -253,37 +267,26 @@ public final class LauncherWindow {
     }
 
 
-    private JPanel buildHeader() {
-        JPanel header = new JPanel();
-        header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
-        header.setBackground(BG);
+    /** The bottom area: the console, with a slim status footer beneath it (no top bar). */
+    private JPanel buildBottom() {
+        JPanel bottom = new JPanel(new BorderLayout(0, 4));
+        bottom.setBackground(BG);
+        bottom.add(buildLogArea(), BorderLayout.CENTER);
 
-        JLabel title = new JLabel("Meridian Launcher");
-        title.setForeground(FG);
-        title.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 18));
-        title.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-        subtitle = new JLabel("Add your Hytale account to get started.");
-        subtitle.setForeground(MUTED);
-        subtitle.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
-        subtitle.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-        JPanel statusRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 8));
-        statusRow.setOpaque(false);
-        statusRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JPanel footer = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        footer.setOpaque(false);
         statusDot = new JLabel("●");
         statusDot.setForeground(MUTED);
         statusText = new JLabel(" ");
         statusText.setForeground(FG);
-        statusText.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
-        statusRow.add(statusDot);
-        statusRow.add(statusText);
-
-        header.add(title);
-        header.add(Box.createVerticalStrut(2));
-        header.add(subtitle);
-        header.add(statusRow);
-        return header;
+        statusText.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        subtitle = new JLabel("Add your Hytale account to get started.");
+        subtitle.setForeground(MUTED);
+        footer.add(statusDot);
+        footer.add(statusText);
+        footer.add(subtitle);
+        bottom.add(footer, BorderLayout.SOUTH);
+        return bottom;
     }
 
     private JScrollPane buildLogArea() {
@@ -297,28 +300,28 @@ public final class LauncherWindow {
         log.setForeground(new Color(200, 200, 200));
         log.setMargin(new Insets(8, 8, 8, 8));
         JScrollPane scroll = new JScrollPane(log);
-        scroll.setBorder(BorderFactory.createLineBorder(new Color(45, 45, 45)));
-        scroll.setPreferredSize(new Dimension(0, 240));
+        javax.swing.border.TitledBorder tb = BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(new Color(45, 45, 45)), "Console");
+        tb.setTitleColor(MUTED);
+        tb.setTitleFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
+        scroll.setBorder(tb);
+        scroll.setPreferredSize(new Dimension(0, 96));   // compact console, at the bottom
         return scroll;
     }
 
-    private JPanel buildActions() {
-        JPanel south = new JPanel();
-        south.setLayout(new BoxLayout(south, BoxLayout.Y_AXIS));
-        south.setBackground(BG);
-        south.setBorder(BorderFactory.createEmptyBorder(12, 0, 0, 0));
+    private JPanel buildGrid() {
+        // --- Account controls ---
+        accountBox = new javax.swing.JComboBox<>();
+        accountBox.setPrototypeDisplayValue(new ProfileItem(
+                new meridian.launcher.auth.SessionProvider.ProfileRow(
+                        new meridian.launcher.auth.Account("", "account", null, null),
+                        new meridian.launcher.auth.HytaleAuth.Profile("", "a-long-profile-name"))));
+        accountBox.addActionListener(e -> { updateLaunchEnabled(); refreshUpdateRow(); });
+        addAccountButton = textButton("Add account", e -> addAccount());
+        removeAccountButton = textButton("Remove", e -> removeAccount());
 
-        // Hytale folder + version row.
-        JPanel clientRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        clientRow.setBackground(BAR);
-        clientRow.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
-        clientRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        clientRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
-
-        JLabel folderLabel = new JLabel("Hytale folder:");
-        folderLabel.setForeground(FG);
-        folderLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
-        clientField = new JTextField(26);
+        // --- Game-version controls ---
+        clientField = new JTextField(24);
         clientField.setToolTipText("The Hytale folder (holds install/ and data/); default %APPDATA%/Hytale");
         HytaleRoot.locate(null).ifPresent(p -> clientField.setText(p.toString()));
         clientField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
@@ -326,123 +329,97 @@ public final class LauncherWindow {
             public void removeUpdate(javax.swing.event.DocumentEvent e) { reloadVersions(); }
             public void changedUpdate(javax.swing.event.DocumentEvent e) { reloadVersions(); }
         });
-        JButton browse = new JButton("Browse…");
-        browse.setFocusPainted(false);
-        browse.addActionListener(e -> chooseFolder());
+        JButton browse = textButton("Browse…", e -> chooseFolder());
 
-        clientRow.add(folderLabel);
-        clientRow.add(clientField);
-        clientRow.add(browse);
-
-        // Version row (its own line, above the folder): dropdown + Save version.
-        JPanel versionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        versionRow.setBackground(BAR);
-        versionRow.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
-        versionRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        versionRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
-
-        JLabel versionLabel = new JLabel("Version:");
-        versionLabel.setForeground(FG);
-        versionLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
         versionBox = new javax.swing.JComboBox<>();
         versionBox.setPrototypeDisplayValue("pre-release   ");
-        versionBox.addActionListener(e -> updateLaunchEnabled());
+        versionBox.addActionListener(e -> { updateLaunchEnabled(); refreshUpdateRow(); });
+        updateButton = textButton("Update", e -> updateGame());
+        updateButton.setToolTipText("Update the selected version to the newest build of its channel");
+        updateToLabel = new JLabel(" ");
+        updateToLabel.setForeground(MUTED);
+        updateToLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        JButton installButton = textButton("Install version…", e -> toggleInstallList());
+        installButton.setToolTipText("List versions available to your account and install one");
+        JButton saveVersionButton = textButton("Save version", e -> saveVersion());
+        saveVersionButton.setToolTipText("Copy the selected version's install to a named snapshot"
+                + " so it survives the next update");
 
-        JButton saveVersionButton = new JButton("Save version");
-        saveVersionButton.setFocusPainted(false);
-        saveVersionButton.setToolTipText("Copy the selected version's install to a named"
-                + " snapshot so it survives the next update");
-        saveVersionButton.addActionListener(e -> saveVersion());
-
-        versionRow.add(versionLabel);
-        versionRow.add(versionBox);
-        versionRow.add(saveVersionButton);
-
-        JLabel proxyLabel = new JLabel("Proxy:");
-        proxyLabel.setForeground(FG);
-        proxyLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
-        proxyBox = new javax.swing.JComboBox<>();
-        proxyBox.setPrototypeDisplayValue(new ProxyItem(java.nio.file.Path.of("meridian-proxy-x.y.z-all.jar")));
-        proxyBox.setToolTipText("Meridian proxy jar to run (found next to the launcher)");
-        versionRow.add(Box.createHorizontalStrut(12));
-        versionRow.add(proxyLabel);
-        versionRow.add(proxyBox);
-        this.versionRow = versionRow;
-
-        // Account row: pick which account to launch, add another, or remove one.
-        JPanel accountRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        accountRow.setBackground(BAR);
-        accountRow.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
-        accountRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        accountRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
-
-        JLabel accountLabel = new JLabel("Account:");
-        accountLabel.setForeground(FG);
-        accountLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
-        accountBox = new javax.swing.JComboBox<>();
-        accountBox.setPrototypeDisplayValue(new ProfileItem(
-                new meridian.launcher.auth.SessionProvider.ProfileRow(
-                        new meridian.launcher.auth.Account("", "account", null, null),
-                        new meridian.launcher.auth.HytaleAuth.Profile("", "a-long-profile-name"))));
-        accountBox.addActionListener(e -> updateLaunchEnabled());
-
-        addAccountButton = new JButton("Add account");
-        addAccountButton.setFocusPainted(false);
-        addAccountButton.addActionListener(e -> addAccount());
-
-        removeAccountButton = new JButton("Remove");
-        removeAccountButton.setFocusPainted(false);
-        removeAccountButton.addActionListener(e -> removeAccount());
-
-        accountRow.add(accountLabel);
-        accountRow.add(accountBox);
-        accountRow.add(addAccountButton);
-        accountRow.add(removeAccountButton);
-
-        // Launch row.
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
-        buttons.setOpaque(false);
-        buttons.setAlignmentX(Component.LEFT_ALIGNMENT);
-
+        // --- Launch controls ---
         launchButton = new JButton("Launch game");
         launchButton.setFocusPainted(false);
         launchButton.setEnabled(false);
         launchButton.setMargin(new Insets(4, 18, 4, 18));
         launchButton.addActionListener(e -> launch());
-        buttons.add(launchButton);
 
-        blockTelemetryCheck = new javax.swing.JCheckBox("Block telemetry");
-        blockTelemetryCheck.setOpaque(false);
-        blockTelemetryCheck.setForeground(FG);
-        blockTelemetryCheck.setFocusPainted(false);
-        blockTelemetryCheck.setToolTipText("Route the game through a local proxy that refuses"
-                + " its telemetry / crash-reporting hosts (" + String.join(", ", HytaleBackends.TELEMETRY) + ")");
-        blockTelemetryCheck.setSelected(settings.getBool(PREF_BLOCK_TELEMETRY, false));
-        blockTelemetryCheck.addActionListener(e ->
-                persistFlag(PREF_BLOCK_TELEMETRY, blockTelemetryCheck.isSelected()));
-        buttons.add(Box.createHorizontalStrut(12));
-        buttons.add(blockTelemetryCheck);
+        blockTelemetryCheck = checkBox("Block telemetry", PREF_BLOCK_TELEMETRY, null);
+        blockTelemetryCheck.setToolTipText("Route the game through a local proxy that refuses its"
+                + " telemetry / crash-reporting hosts (" + String.join(", ", HytaleBackends.TELEMETRY) + ")");
+        useProxyCheck = checkBox("Use proxy", PREF_USE_PROXY,
+                () -> { if (proxyBox != null) proxyBox.setEnabled(useProxyCheck.isSelected()); });
+        useProxyCheck.setToolTipText("Route the game's servers through the Meridian proxy: the in-game"
+                + " server list is rewritten to the local proxy, which relays to the real servers.");
+        logRequestsCheck = checkBox("Log all HTTPS requests", PREF_LOG_REQUESTS, null);
+        logRequestsCheck.setToolTipText("<html>MITM-decrypt the game's HTTPS and log every request"
+                + " — method, URL, POST body and the response — to the console and to"
+                + " logs/launcher.log.<br>Installs the Meridian CA for the game (like the proxy)."
+                + " The log may contain tokens / personal data. A rarely-seen pinned host would fail"
+                + " while this is on.</html>");
+        proxyBox = new javax.swing.JComboBox<>();
+        proxyBox.setPrototypeDisplayValue(new ProxyItem(java.nio.file.Path.of("meridian-proxy-x.y.z-all.jar")));
+        proxyBox.setToolTipText("Meridian proxy jar to run (found next to the launcher)");
 
-        useProxyCheck = new javax.swing.JCheckBox("Use proxy");
-        useProxyCheck.setOpaque(false);
-        useProxyCheck.setForeground(FG);
-        useProxyCheck.setFocusPainted(false);
-        useProxyCheck.setToolTipText("Route the game's servers through the Meridian proxy: the"
-                + " in-game server list is rewritten to the local proxy, which relays to the real"
-                + " servers. Starts the selected proxy jar on launch.");
-        useProxyCheck.setSelected(settings.getBool(PREF_USE_PROXY, false));
-        useProxyCheck.addActionListener(e -> {
-            persistFlag(PREF_USE_PROXY, useProxyCheck.isSelected());
-            if (proxyBox != null) proxyBox.setEnabled(useProxyCheck.isSelected());
-        });
-        buttons.add(Box.createHorizontalStrut(12));
-        buttons.add(useProxyCheck);
+        // --- cell 1: Game version (responsive; Update row appears only when an update exists) ---
+        JPanel gameVersion = migCell("Game version", "[]6[grow,fill]6[]");
+        gameVersion.add(boldLabel("Folder:"));
+        gameVersion.add(clientField, "growx");
+        gameVersion.add(browse, "wrap");
+        gameVersion.add(boldLabel("Version:"));
+        gameVersion.add(versionBox, "growx");
+        gameVersion.add(saveVersionButton, "wrap");
+        updateButton.setVisible(false);
+        updateToLabel.setVisible(false);
+        gameVersion.add(updateButton);
+        gameVersion.add(updateToLabel, "span 2, growx, wrap");
+        gameVersion.add(installButton, "span 3, growx, wrap");
 
-        south.add(accountRow);
-        south.add(versionRow);
-        south.add(clientRow);
-        south.add(buttons);
-        return south;
+        // --- cell 2: Account (dropdown fills; each button full-width on its own row) ---
+        JPanel account = migCell("Account", "[]6[grow,fill]");
+        account.add(boldLabel("Account:"));
+        account.add(accountBox, "growx, wrap");
+        account.add(addAccountButton, "span 2, growx, wrap");
+        account.add(removeAccountButton, "span 2, growx, wrap");
+
+        // --- cell 3: inline install list (blank until "Install version…") ---
+        installListCell = new JPanel(new BorderLayout());
+        installListCell.setBackground(BG);
+
+        // --- cell 4: Launch (proxy first, then toggles; Launch full-width, pinned to the bottom) ---
+        JPanel launchControls = new JPanel(new net.miginfocom.swing.MigLayout(
+                "fillx, insets 0", "[]6[grow,fill]", ""));
+        launchControls.setBackground(BG);
+        launchControls.add(boldLabel("Proxy:"));
+        launchControls.add(proxyBox, "growx, wrap");
+        launchControls.add(blockTelemetryCheck, "span 2, wrap");
+        launchControls.add(useProxyCheck, "span 2, wrap");
+        launchControls.add(logRequestsCheck, "span 2");
+        JPanel launchCell = new JPanel(new BorderLayout(0, 10));
+        launchCell.setBackground(BG);
+        launchCell.setBorder(BorderFactory.createCompoundBorder(
+                titledCellBorder("Launch"), BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+        launchCell.add(launchControls, BorderLayout.NORTH);
+        launchCell.add(launchButton, BorderLayout.SOUTH);   // BorderLayout SOUTH = pinned to bottom
+
+        // 2×2 grid:  Game version | Account
+        //            Install list | Launch
+        JPanel grid = new JPanel(new java.awt.GridLayout(2, 2, 12, 12));
+        grid.setBackground(BG);
+        grid.setBorder(BorderFactory.createEmptyBorder(10, 0, 10, 0));
+        grid.add(gameVersion);
+        grid.add(account);
+        grid.add(installListCell);
+        grid.add(launchCell);
+        return grid;
     }
 
     // --- actions ----------------------------------------------------------------------
@@ -512,6 +489,299 @@ public final class LauncherWindow {
                 setBusyAsync(false, null);
             }
         });
+    }
+
+    /**
+     * Checks the selected version's channel for a newer build and applies the delta(s). Runs off
+     * the EDT (download + apply are long); progress goes to the status line and log. Downloads are
+     * authorised by an access token refreshed from the selected account.
+     */
+    private void updateGame() {
+        if (busy) return;
+        HytaleInstall install = selectedInstall();
+        if (install == null) {
+            append("Pick a Hytale folder and version first.");
+            return;
+        }
+        meridian.launcher.auth.Account account = selectedAccount();
+        if (account == null) {
+            append("Select an account — updating downloads through your Hytale login.");
+            return;
+        }
+        Path root = install.root;
+        String patchline = install.version;
+        setBusy(true, "Checking for updates…");
+        append("Checking " + patchline + " for updates…");
+        Thread.startVirtualThread(() -> {
+            try {
+                String access = provider.accessToken(account.id);
+                meridian.launcher.update.GameUpdater updater = new meridian.launcher.update.GameUpdater();
+                meridian.launcher.update.GameUpdater.UpdateCheck chk = updater.check(root, patchline, access);
+                SwingUtilities.invokeLater(() -> confirmAndUpdate(updater, root, patchline, access, chk));
+            } catch (Exception e) {
+                appendAsync("Update check failed: " + e.getMessage());
+                setBusyAsync(false, "Update check failed");
+            }
+        });
+    }
+
+    /** On the EDT: report the verdict and, when an update exists, confirm before applying. */
+    private void confirmAndUpdate(meridian.launcher.update.GameUpdater updater, Path root,
+                                  String patchline, String access,
+                                  meridian.launcher.update.GameUpdater.UpdateCheck chk) {
+        if (!chk.updateAvailable()) {
+            append("Already up to date (build " + chk.currentBuild() + ").");
+            setBusy(false, "Up to date (build " + chk.currentBuild() + ")");
+            return;
+        }
+        String message = "Update " + patchline + " from build " + chk.currentBuild()
+                + " to build " + chk.newestBuild() + "?";
+        if (chk.fullReinstall()) {
+            message += "\n\nThis channel has no incremental patch from your build, so this downloads"
+                    + " the FULL build (can be ~1 GB+) and replaces the current install of " + patchline + ".";
+        }
+        int choice = javax.swing.JOptionPane.showConfirmDialog(frame, message, "Update available",
+                javax.swing.JOptionPane.OK_CANCEL_OPTION, javax.swing.JOptionPane.QUESTION_MESSAGE);
+        if (choice != javax.swing.JOptionPane.OK_OPTION) {
+            append("Update cancelled.");
+            setBusy(false, null);
+            return;
+        }
+        append("Updating " + patchline + ": build " + chk.currentBuild() + " → " + chk.newestBuild() + "…");
+        Thread.startVirtualThread(() -> runUpdate(updater, root, patchline, access));
+    }
+
+    /** Off the EDT: download + apply the update, streaming throttled progress to the status line. */
+    private void runUpdate(meridian.launcher.update.GameUpdater updater, Path root,
+                           String patchline, String access) {
+        try {
+            Path cache = meridian.launcher.AppPaths.resolve("update-cache");
+            String[] phase = {"Working"};
+            int[] lastPct = {-1};
+            int result = updater.update(root, patchline, access, cache,
+                    new meridian.launcher.update.GameUpdater.Listener() {
+                        @Override public void phase(String m) {
+                            phase[0] = m; lastPct[0] = -1;
+                            appendAsync(m); setStatusAsync(ACCENT, m);
+                        }
+                        @Override public void bytes(long done, long total) {
+                            if (total <= 0) return;
+                            int pct = (int) (done * 100 / total);
+                            if (pct != lastPct[0]) {
+                                lastPct[0] = pct;
+                                setStatusAsync(ACCENT, phase[0] + "  " + pct + "%");
+                            }
+                        }
+                    });
+            appendAsync("Updated " + patchline + " to build " + result + ".");
+            SwingUtilities.invokeLater(() -> {
+                reloadVersions();
+                refreshUpdateRow();
+                setBusy(false, "Updated to build " + result);
+            });
+        } catch (Exception e) {
+            appendAsync("Update failed: " + e.getMessage());
+            setBusyAsync(false, "Update failed");
+        }
+    }
+
+    /**
+     * Toggles the inline install list in grid cell #3: fetches the versions the account can install
+     * and lists them there (not a popup), each with its own Install/Update action. Clicking the
+     * button again — or finishing an install — clears the cell back to blank.
+     */
+    private void toggleInstallList() {
+        if (installListCell.getComponentCount() > 0) {   // already open → close
+            clearInstallList();
+            return;
+        }
+        if (busy) return;
+        Path root = HytaleRoot.locate(clientField.getText().trim()).orElse(null);
+        meridian.launcher.auth.Account account = selectedAccount();
+        if (root == null) {
+            append("Pick a Hytale folder first.");
+            return;
+        }
+        if (account == null) {
+            append("Select an account first — installing downloads through your Hytale login.");
+            return;
+        }
+        setBusy(true, "Fetching versions…");
+        append("Fetching available versions…");
+        Thread.startVirtualThread(() -> {
+            try {
+                String access = provider.accessToken(account.id);
+                java.util.List<meridian.launcher.update.VersionCatalog.ChannelVersion> catalog =
+                        new meridian.launcher.update.VersionCatalog().discover(access, root);
+                appendAsync(catalog.size() + " version(s) available — done.");
+                SwingUtilities.invokeLater(() -> {
+                    fillInstallList(root, access, catalog);
+                    setBusy(false, null);
+                });
+            } catch (Exception e) {
+                appendAsync("Could not fetch versions: " + e.getMessage());
+                setBusyAsync(false, null);
+            }
+        });
+    }
+
+    /** Renders the available versions into cell #3, each row an Install/Update action. */
+    private void fillInstallList(Path root, String access,
+            java.util.List<meridian.launcher.update.VersionCatalog.ChannelVersion> catalog) {
+        installListCell.removeAll();
+        installListCell.setBorder(titledCellBorder("Install list"));
+        JPanel inner = new JPanel(new net.miginfocom.swing.MigLayout(
+                "fillx, insets 4", "[][grow,fill]", ""));
+        inner.setBackground(BG);
+        if (catalog.isEmpty()) {
+            JLabel none = new JLabel("No versions available to your account.");
+            none.setForeground(MUTED);
+            inner.add(none, "span 2, wrap");
+        }
+        for (var cv : catalog) {
+            String state = !cv.installed() ? "not installed"
+                    : cv.upToDate() ? "up to date"
+                    : "build " + cv.installedBuild() + " → " + cv.newestBuild();
+            String size = cv.size() > 0 ? "  ·  " + (cv.size() / 1_000_000) + " MB" : "";
+            // Keep the rolling channel label (release / pre-release); drop the junky pinned "vX.Y".
+            String prefix = cv.channel().matches("v\\d.*") ? "" : cv.channel() + "  —  ";
+            JLabel label = new JLabel(prefix + cv.version() + "  (" + state + ")" + size);
+            label.setForeground(FG);
+            JButton act = textButton(cv.installed() ? "Update" : "Install", ev -> {
+                clearInstallList();
+                startInstall(root, access, cv.channel(), cv.version());
+            });
+            act.setEnabled(!cv.upToDate());
+            inner.add(act);
+            inner.add(label, "growx, wrap");
+        }
+
+        JScrollPane sc = new JScrollPane(inner);
+        sc.setBorder(BorderFactory.createEmptyBorder());
+        sc.getViewport().setBackground(BG);
+        installListCell.add(sc, BorderLayout.CENTER);
+        installListCell.revalidate();
+        installListCell.repaint();
+    }
+
+    private void clearInstallList() {
+        installListCell.removeAll();
+        installListCell.setBorder(BorderFactory.createEmptyBorder());
+        installListCell.revalidate();
+        installListCell.repaint();
+    }
+
+    private void startInstall(Path root, String access, String channel, String version) {
+        if (busy) return;
+        setBusy(true, "Installing " + channel + "…");
+        append("Installing " + channel + " " + version + "…");
+        Thread.startVirtualThread(() -> {
+            try {
+                Path cache = meridian.launcher.AppPaths.resolve("update-cache");
+                String[] phase = {"Working"};
+                int[] lastPct = {-1};
+                int result = new meridian.launcher.update.GameUpdater().installOrUpdate(root, channel, access, cache,
+                        new meridian.launcher.update.GameUpdater.Listener() {
+                            @Override public void phase(String m) {
+                                phase[0] = m; lastPct[0] = -1;
+                                appendAsync(m); setStatusAsync(ACCENT, m);
+                            }
+                            @Override public void bytes(long done, long total) {
+                                if (total <= 0) return;
+                                int pct = (int) (done * 100 / total);
+                                if (pct != lastPct[0]) {
+                                    lastPct[0] = pct;
+                                    setStatusAsync(ACCENT, phase[0] + "  " + pct + "%");
+                                }
+                            }
+                        });
+                appendAsync(channel + " is now at build " + result + ".");
+                SwingUtilities.invokeLater(() -> {
+                    reloadVersions();
+                    refreshUpdateRow();
+                    setBusy(false, channel + " → build " + result);
+                });
+            } catch (Exception e) {
+                appendAsync("Install failed: " + e.getMessage());
+                setBusyAsync(false, "Install failed");
+            }
+        });
+    }
+
+    private javax.swing.border.Border titledCellBorder(String title) {
+        javax.swing.border.TitledBorder tb = BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(BAR), title);
+        tb.setTitleColor(MUTED);
+        tb.setTitleFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
+        return BorderFactory.createCompoundBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0), tb);
+    }
+
+    // --- Update availability (the conditional "Update  to <version>" row) --------------
+
+    /** Fetches the account's patchlines (once per account, off the EDT) and refreshes the row. */
+    private void refreshPatchlinesAsync() {
+        meridian.launcher.auth.Account account = selectedAccount();
+        Path root = HytaleRoot.locate(clientField.getText().trim()).orElse(null);
+        if (account == null || root == null || patchlinesFetching) return;
+        if (account.id.equals(patchlineAccount) && !patchlineCache.isEmpty()) {
+            refreshUpdateRow();
+            return;
+        }
+        patchlinesFetching = true;
+        Thread.startVirtualThread(() -> {
+            try {
+                String access = provider.accessToken(account.id);
+                meridian.launcher.update.InstallEnv.Platform pf =
+                        meridian.launcher.update.InstallEnv.currentPlatform();
+                java.util.List<meridian.launcher.update.UpdateClient.Patchline> lines =
+                        new meridian.launcher.update.UpdateClient().patchlines(access, pf.os(), pf.arch());
+                SwingUtilities.invokeLater(() -> {
+                    patchlineCache.clear();
+                    for (var pl : lines) patchlineCache.put(pl.channel(), pl);
+                    patchlineAccount = account.id;
+                    refreshUpdateRow();
+                });
+            } catch (Exception ignored) {
+                // best-effort — the Update row just stays hidden if we can't reach the API
+            } finally {
+                patchlinesFetching = false;
+            }
+        });
+    }
+
+    /** Shows the Update row (with "to &lt;version&gt;") only when the selected version can update. */
+    private void refreshUpdateRow() {
+        if (updateButton == null) return;
+        meridian.launcher.auth.Account account = selectedAccount();
+        // Lazily pull this account's patchlines (once) so we know each channel's newest build.
+        if (account != null && (patchlineCache.isEmpty() || !account.id.equals(patchlineAccount))) {
+            refreshPatchlinesAsync();
+        }
+        boolean show = false;
+        String to = " ";
+        String version = versionBox == null ? null : (String) versionBox.getSelectedItem();
+        Path root = HytaleRoot.locate(clientField.getText().trim()).orElse(null);
+        if (version != null && root != null) {
+            meridian.launcher.update.UpdateClient.Patchline pl = patchlineCache.get(version);
+            if (pl != null) {
+                try {
+                    int installed = meridian.launcher.update.InstallEnv.currentBuild(root, version);
+                    if (pl.newest() > installed) {
+                        show = true;
+                        to = "to " + pl.buildVersion() + "  (build " + pl.newest() + ")";
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        updateToLabel.setText(to);
+        updateButton.setVisible(show);
+        updateToLabel.setVisible(show);
+        java.awt.Container parent = updateButton.getParent();
+        if (parent != null) {
+            parent.revalidate();
+            parent.repaint();
+        }
     }
 
     /** The Hytale install for the current folder + version selection, or null. */
@@ -601,6 +871,7 @@ public final class LauncherWindow {
         }
         boolean blockTelemetry = blockTelemetryCheck.isSelected();
         boolean useProxy = useProxyCheck.isSelected();
+        boolean logHttps = logRequestsCheck.isSelected();
         Path proxyJar = selectedProxyJar();
         String gv = HytaleRoot.gameVersion(install.root, install.version);
         final String version = gv != null ? gv : install.version;
@@ -616,8 +887,7 @@ public final class LauncherWindow {
             // (first run of a version), or a plain CONNECT-block proxy (telemetry). Null if none.
             AutoCloseable proxy = null;
             CertificateAuthority captureCa = null;
-            boolean caWeInstalled = false;
-            boolean capturing = false;
+            boolean usedCa = false;
             Process proxyProcess = null;
             meridian.launcher.launch.ProxyControl proxyControl = null;
             try {
@@ -627,62 +897,51 @@ public final class LauncherWindow {
                         account.id, item.profileUuid(), item.username(), this::openBrowser);
 
                 ServerParamsStore store = ServerParamsStore.defaultStore();
-                ServerParams params = store.get(version);
-                capturing = params == null || !params.isComplete();
 
                 Map<String, String> env = Map.of();
-                if (useProxy) {
-                    // Redirect gameplay UDP: MITM server-discovery to rewrite every listing to
-                    // 127.0.0.1:<localPort>, record port→realServer in a routes file, and run the
-                    // proxy in multiplex mode over that file. The game Direct-Connects to loopback
-                    // and its QUIC flows through the proxy, which relays to the real server.
+                if (useProxy || logHttps) {
+                    // Both modes MITM the game's HTTPS, so both need our CA trusted by the game.
+                    // useProxy also redirects gameplay UDP: MITM server-discovery to rewrite every
+                    // listing to 127.0.0.1:<localPort>, record port→realServer, and run the proxy in
+                    // multiplex mode. logHttps just logs every decrypted request line.
+                    usedCa = true;
+                    caUsers.incrementAndGet();   // hold the CA installed until the last window exits
                     Path caDir = meridian.launcher.AppPaths.resolve("ca");
                     captureCa = CertificateAuthority.loadOrCreate(caDir);
                     if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(captureCa.caCertificate())) {
                         WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
-                        caWeInstalled = true;
+                        caInstalledByUs = true;
                     }
-                    proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
-                    // Drive the proxy over its stdin (a parent→child pipe, not files): hand it the
-                    // player token, and announce a route for each server as the listing is rewritten.
-                    proxyControl = new meridian.launcher.launch.ProxyControl(proxyProcess.getOutputStream());
-                    proxyControl.token(s.sessionToken);
-                    RouteRegistry routes = RouteRegistry.create(proxyControl::route);
                     Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
-                    handlers.put("server-discovery.hytale.com", new ServerDiscoveryRewriter(store, routes));
+                    if (useProxy) {
+                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
+                        // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
+                        // the player token, and announce a route for each server as the listing is
+                        // rewritten.
+                        proxyControl = new meridian.launcher.launch.ProxyControl(proxyProcess.getOutputStream());
+                        proxyControl.token(s.sessionToken);
+                        RouteRegistry routes = RouteRegistry.create(proxyControl::route);
+                        handlers.put("server-discovery.hytale.com", new ServerDiscoveryRewriter(store, routes));
+                    }
                     java.util.Set<String> block = blockTelemetry ? HytaleBackends.TELEMETRY : java.util.Set.of();
                     MitmProxy mitm = new MitmProxy(0, captureCa, java.util.Set.of(), handlers, block);
+                    mitm.setLogRequests(logHttps, this::logHttpRequest);
                     mitm.start();
                     proxy = mitm;
                     env = proxyEnv("http://127.0.0.1:" + mitm.port());
                     if (!WindowsCaTrust.isWindows()) {
                         env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
                     }
-                    appendAsync("Proxy ON — " + proxyJar.getFileName() + " (multiplex); the in-game"
-                            + " server list is redirected through it"
+                    String on = useProxy
+                            ? "Proxy ON — " + proxyJar.getFileName() + " (multiplex); server list redirected through it"
+                            : "HTTPS request logging ON — MITM-decrypting the game's HTTPS";
+                    appendAsync(on
+                            + (logHttps && useProxy ? "; logging all HTTPS requests" : "")
                             + (blockTelemetry ? "; telemetry blocked." : "."));
-                } else if (capturing) {
-                    // First launch of this version: capture its server-discovery params
-                    // (protocolVersion + clientSeed) so it becomes browsable in the Servers tab.
-                    Path caDir = meridian.launcher.AppPaths.resolve("ca");
-                    captureCa = CertificateAuthority.loadOrCreate(caDir);
-                    if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(captureCa.caCertificate())) {
-                        WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
-                        caWeInstalled = true;
+                    if (logHttps) {
+                        appendAsync("Writing HTTPS requests (with bodies + responses — may contain "
+                                + "tokens) to " + httpRequestLogPath());
                     }
-                    Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
-                    handlers.put("server-discovery.hytale.com", new ListingsParamCapture(store));
-                    java.util.Set<String> block = blockTelemetry ? HytaleBackends.TELEMETRY : java.util.Set.of();
-                    MitmProxy mitm = new MitmProxy(0, captureCa, java.util.Set.of(), handlers, block);
-                    mitm.start();
-                    proxy = mitm;
-                    env = proxyEnv("http://127.0.0.1:" + mitm.port());
-                    if (!WindowsCaTrust.isWindows()) {
-                        env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
-                    }
-                    appendAsync("First launch of " + version + " — capturing its server list params"
-                            + (blockTelemetry ? " (telemetry blocked)." : ".")
-                            + " Open the in-game Servers browser (random list) once.");
                 } else if (blockTelemetry) {
                     CaptureProxy cp = new CaptureProxy(0, HytaleBackends.TELEMETRY);
                     cp.start();
@@ -699,18 +958,6 @@ public final class LauncherWindow {
                 setBusyAsync(false, null);
                 int code = p.waitFor();
                 appendAsync("Client (" + s.profileUsername + ") exited with code " + code + ".");
-                if (capturing && !useProxy) {
-                    ServerParams got = store.get(version);
-                    if (got != null && got.isComplete()) {
-                        appendAsync("Captured server params for " + version + " — it's now in the Servers tab.");
-                    } else if (got != null && got.protocolVersion() != null) {
-                        appendAsync("Got protocolVersion for " + version + " but not clientSeed — open the"
-                                + " random server list in-game next time to finish capturing.");
-                    } else {
-                        appendAsync("No server params captured for " + version
-                                + " (server browser not opened, or the host is pinned).");
-                    }
-                }
                 setStatusAsync(BG, " ");   // back to idle; the log records the exit
             } catch (Exception e) {
                 appendAsync("Launch failed: " + e.getMessage());
@@ -725,14 +972,42 @@ public final class LauncherWindow {
                 if (proxy != null) {
                     try { proxy.close(); } catch (Exception ignored) { }
                 }
-                if (caWeInstalled && captureCa != null) {
+                // Uninstall the CA only when the LAST window that used it exits — otherwise closing
+                // one of several open game windows would strip the cert the others still need.
+                if (usedCa && caUsers.decrementAndGet() == 0 && caInstalledByUs && captureCa != null) {
                     try {
                         WindowsCaTrust.uninstall(captureCa.caCertificate());
+                        caInstalledByUs = false;
                     } catch (Exception ignored) {
                     }
                 }
             }
         });
+    }
+
+    /** Sends one HTTPS request line to the console and appends it to the dedicated log file. */
+    private void logHttpRequest(String line) {
+        appendAsync(line);
+        synchronized (httpRequestLogLock) {
+            try {
+                if (httpRequestLog == null) {
+                    java.nio.file.Path file = httpRequestLogPath();
+                    java.nio.file.Files.createDirectories(file.getParent());
+                    httpRequestLog = new java.io.PrintWriter(
+                            new java.io.FileWriter(file.toFile(), true), true);
+                }
+                String time = java.time.LocalTime.now()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));
+                httpRequestLog.println(time + "  " + line);
+            } catch (Exception ignored) {
+                // logging must never break a launch
+            }
+        }
+    }
+
+    /** The launcher's own log file (kept separate from the proxy's {@code logs/meridian.log}). */
+    private static java.nio.file.Path httpRequestLogPath() {
+        return meridian.launcher.AppPaths.launcherDir().resolve("logs").resolve("launcher.log");
     }
 
     /** Proxy env vars (both cases + ALL_PROXY) pointing the client's HTTP stack at {@code url}. */
@@ -763,6 +1038,44 @@ public final class LauncherWindow {
         settings.setBool(key, value);
     }
 
+    // --- small UI builders ------------------------------------------------------------
+
+    /** A titled grid cell backed by MigLayout, so its rows stretch with the window. */
+    private JPanel migCell(String title, String columns) {
+        JPanel p = new JPanel(new net.miginfocom.swing.MigLayout(
+                "fillx, hidemode 3, insets 8 10 8 10", columns, ""));
+        p.setBackground(BG);
+        p.setBorder(titledCellBorder(title));
+        return p;
+    }
+
+    private JLabel boldLabel(String text) {
+        JLabel l = new JLabel(text);
+        l.setForeground(FG);
+        l.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+        return l;
+    }
+
+    private JButton textButton(String text, java.awt.event.ActionListener action) {
+        JButton b = new JButton(text);
+        b.setFocusPainted(false);
+        b.addActionListener(action);
+        return b;
+    }
+
+    private javax.swing.JCheckBox checkBox(String text, String prefKey, Runnable onToggle) {
+        javax.swing.JCheckBox cb = new javax.swing.JCheckBox(text);
+        cb.setOpaque(false);
+        cb.setForeground(FG);
+        cb.setFocusPainted(false);
+        cb.setSelected(settings.getBool(prefKey, false));
+        cb.addActionListener(e -> {
+            persistFlag(prefKey, cb.isSelected());
+            if (onToggle != null) onToggle.run();
+        });
+        return cb;
+    }
+
     private void updateLaunchEnabled() {
         boolean ready = selectedAccount() != null && !busy && selectedInstall() != null;
         if (launchButton != null) launchButton.setEnabled(ready);
@@ -773,6 +1086,7 @@ public final class LauncherWindow {
         this.busy = b;
         if (addAccountButton != null) addAccountButton.setEnabled(!b);
         if (accountBox != null) accountBox.setEnabled(!b);
+        if (updateButton != null) updateButton.setEnabled(!b);
         if (status != null) setStatus(b ? ACCENT : MUTED, status);
         updateLaunchEnabled();
     }

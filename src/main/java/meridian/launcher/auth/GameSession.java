@@ -22,6 +22,14 @@ public final class GameSession {
     @SerializedName("refreshToken")
     public String refreshToken;
 
+    /**
+     * Singleplayer/offline token for this profile ({@code HYTALE_OFFLINE_TOKEN}), minted alongside
+     * the session. Best-effort — null if the offline mint was unavailable; the client only needs it
+     * for the local singleplayer server.
+     */
+    @SerializedName("offlineToken")
+    public String offlineToken;
+
     /** Profile the session was minted for, filled in from the launcher data. */
     public String profileUuid;
     public String profileUsername;

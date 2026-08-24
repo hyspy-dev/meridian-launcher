@@ -55,6 +55,19 @@ public final class HytaleAuth {
     /** Profiles plus the (possibly rotated) refresh token that MUST be persisted after the call. */
     public record ProfileList(List<Profile> profiles, String refreshToken) {}
 
+    /** An access token for the account-data/game-assets APIs, plus the (rotated) refresh to persist. */
+    public record Access(String accessToken, String refreshToken) {}
+
+    /**
+     * Refreshes an access token for the download/update API (patch-set, game-assets) without
+     * minting a game session, so it does not disturb a running one. Like {@link #listProfiles},
+     * refreshing rotates the refresh token: the caller MUST persist {@link Access#refreshToken()}.
+     */
+    public Access access(String refreshToken) throws IOException, InterruptedException {
+        Tokens t = accessTokenFrom(refreshToken);
+        return new Access(t.accessToken(), t.refreshToken());
+    }
+
     /**
      * Lists every profile on the account (each a distinct {@code {uuid, username}}), by
      * refreshing an access token and calling get-launcher-data. Does NOT mint a game
@@ -244,8 +257,31 @@ public final class HytaleAuth {
         if (!session.isUsable()) {
             throw new IOException("game-session/new returned no usable tokens");
         }
+        // Best-effort: also mint the singleplayer offline token, for HYTALE_OFFLINE_TOKEN.
+        try {
+            session.offlineToken = offlineToken(accessToken, uuid);
+        } catch (Exception e) {
+            log.info("Offline token unavailable for {}: {}", username, e.toString());
+        }
         log.info("Minted session for {} ({})", username, uuid);
         return session;
+    }
+
+    /** Mints the singleplayer offline token for a profile uuid, or null if unavailable. */
+    private String offlineToken(String accessToken, String uuid) throws IOException, InterruptedException {
+        JsonObject body = new JsonObject();
+        body.addProperty("uuid", uuid);
+        HttpResponse<String> resp = send(HttpRequest.newBuilder(
+                        URI.create(HytaleEndpoints.SESSIONS_BASE + "/game-session/offline"))
+                .header("Authorization", "Bearer " + accessToken)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body.toString())));
+        if (resp.statusCode() / 100 != 2) {
+            return null;
+        }
+        JsonObject json = GSON.fromJson(resp.body(), JsonObject.class);
+        JsonObject tokens = json != null ? json.getAsJsonObject("offlineTokens") : null;
+        return (tokens != null && tokens.has(uuid)) ? tokens.get(uuid).getAsString() : null;
     }
 
     private AuthDtos.GameProfile fetchFirstProfile(String accessToken)

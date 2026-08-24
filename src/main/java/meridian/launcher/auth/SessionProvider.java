@@ -61,7 +61,7 @@ public final class SessionProvider {
      * <p>This does not mint game sessions — it only reads profiles — so it is safe to run on
      * launcher open without disturbing any live game window's session.
      */
-    public int refreshProfiles() {
+    public synchronized int refreshProfiles() {
         int changed = 0;
         for (Account a : store.list()) {
             if (a.refreshToken == null) {
@@ -94,6 +94,26 @@ public final class SessionProvider {
             }
         }
         return changed;
+    }
+
+    /**
+     * An access token for the game-update/download API, refreshed from a specific account. Does
+     * not mint a game session, so it never disturbs a running window. Refreshing rotates the
+     * account's refresh token; the rotated one is persisted here (or the next refresh dies with
+     * {@code invalid_grant}).
+     */
+    public synchronized String accessToken(String accountId) throws IOException, InterruptedException {
+        Account account = requireAccount(accountId);
+        if (account.refreshToken == null) {
+            throw new IOException("Account " + account.displayName()
+                    + " has no refresh token — sign in again to download updates.");
+        }
+        HytaleAuth.Access access = auth.access(account.refreshToken);
+        if (access.refreshToken() != null && !access.refreshToken().equals(account.refreshToken)) {
+            account.refreshToken = access.refreshToken();
+            store.update(account);
+        }
+        return access.accessToken();
     }
 
     /** Every profile across every account, most-recently-used account first — for the picker. */

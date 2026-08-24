@@ -47,6 +47,24 @@
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>1.78</version>
         </dependency>
+        <!-- Brotli decompression for wharf .pwr game deltas (the JDK has no brotli). -->
+        <dependency>
+            <groupId>org.brotli</groupId>
+            <artifactId>dec</artifactId>
+            <version>0.1.2</version>
+        </dependency>
+        <!-- FlatLaf: a modern flat dark look-and-feel so the Swing UI isn't system-default ugly. -->
+        <dependency>
+            <groupId>com.formdev</groupId>
+            <artifactId>flatlaf</artifactId>
+            <version>3.5.1</version>
+        </dependency>
+        <!-- MigLayout: responsive Swing layout (growx/fill) so rows stretch with the window. -->
+        <dependency>
+            <groupId>com.miglayout</groupId>
+            <artifactId>miglayout-swing</artifactId>
+            <version>11.4.2</version>
+        </dependency>
     </dependencies>
 
     <build>

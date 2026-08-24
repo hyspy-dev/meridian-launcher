@@ -54,6 +54,14 @@ public final class MitmProxy implements AutoCloseable {
     private final SSLContext upstreamContext;
     private final java.net.http.HttpClient httpClient;
     private volatile boolean running = true;
+    private volatile boolean logRequests;
+    private volatile java.util.function.Consumer<String> requestLogger;
+
+    /** Routes every host through the full-exchange path (for logging) without altering the response. */
+    private static final ExchangeHandler PASS_THROUGH = HttpExchange::responseBody;
+
+    /** Max characters of a body written to the log; longer bodies are truncated with a size note. */
+    private static final int BODY_LOG_CAP = 4000;
 
     public MitmProxy(int port, CertificateAuthority ca, Set<String> interceptHosts) throws Exception {
         this(port, ca, interceptHosts, Map.of(), Set.of());
@@ -98,6 +106,18 @@ public final class MitmProxy implements AutoCloseable {
 
     public Map<String, Verdict> verdicts() {
         return verdicts;
+    }
+
+    /**
+     * Turns on logging of every decrypted HTTP request line (method + absolute URL) for hosts that
+     * would otherwise be blind-tunnelled — i.e. it MITM-terminates <em>all</em> hosts and logs their
+     * requests. Only hosts that trust our CA are logged; a pinned host is left failing (as with any
+     * interception) and noted. {@code sink}, when non-null, additionally receives each line (e.g. the
+     * UI console); lines always go to the log too. Call before {@link #start()}.
+     */
+    public void setLogRequests(boolean on, java.util.function.Consumer<String> sink) {
+        this.logRequests = on;
+        this.requestLogger = sink;
     }
 
     public void start() {
@@ -153,6 +173,10 @@ public final class MitmProxy implements AutoCloseable {
                 interceptHttp(client, host, port, httpHandlers.get(key));
             } else if (interceptHosts.contains(key)) {
                 intercept(client, host, port);
+            } else if (logRequests) {
+                // Log-all mode: run every host through the full exchange so we capture the request
+                // body and response too, passing the response through unchanged.
+                interceptHttp(client, host, port, PASS_THROUGH);
             } else {
                 tunnel(client, host, port);
             }
@@ -205,6 +229,107 @@ public final class MitmProxy implements AutoCloseable {
     }
 
     /**
+     * Logs one full decrypted exchange for the "log all HTTPS requests" mode: the request line, the
+     * request body (for POSTs etc.), and the response status + body. Goes to the log and, if set, the
+     * extra sink (the UI console + file). Bodies are shown as text for textual content types and
+     * truncated past {@link #BODY_LOG_CAP}; binary bodies are summarised by size.
+     */
+    private void logExchange(HttpExchange ex) {
+        StringBuilder sb = new StringBuilder(512);
+        sb.append(ex.method()).append(" https://").append(ex.host()).append(ex.path());
+        byte[] reqBody = ex.requestBody();
+        if (reqBody != null && reqBody.length > 0) {
+            sb.append("\n    request body: ").append(bodyToText(reqBody, ex.requestHeaders()));
+        }
+        sb.append("\n    response ").append(ex.status());
+        byte[] respBody = ex.responseBody();
+        if (respBody != null && respBody.length > 0) {
+            sb.append(": ").append(bodyToText(respBody, ex.responseHeaders()));
+        }
+        String entry = sb.toString();
+        log.info("HTTPS {}", entry);
+        java.util.function.Consumer<String> sink = requestLogger;
+        if (sink != null) {
+            try {
+                sink.accept(entry);
+            } catch (RuntimeException ignored) {
+                // a UI sink must never break the exchange
+            }
+        }
+    }
+
+    /**
+     * Renders a body for the log: gunzips gzip bodies (e.g. Sentry envelopes) so they read as text
+     * instead of mojibake, shows text as-is (truncated past {@link #BODY_LOG_CAP}), and summarises
+     * genuinely binary bodies by size rather than dumping raw bytes.
+     */
+    private static String bodyToText(byte[] body, Map<String, List<String>> headers) {
+        byte[] data = body;
+        String note = "";
+        if (isGzip(body)) {
+            byte[] inflated = gunzip(body);
+            if (inflated == null) return "<gzip, " + body.length + " bytes>";
+            data = inflated;
+            note = "  [gunzipped from " + body.length + " bytes]";
+        }
+        if (!isMostlyText(data)) {
+            String ct = headerValue(headers, "content-type");
+            return "<" + data.length + " bytes" + (ct != null ? ", " + ct : "") + ">";
+        }
+        String s = new String(data, StandardCharsets.UTF_8);
+        if (s.length() > BODY_LOG_CAP) {
+            s = s.substring(0, BODY_LOG_CAP) + "…(" + data.length + " bytes total)";
+        }
+        return s + note;
+    }
+
+    private static boolean isGzip(byte[] b) {
+        return b.length >= 2 && (b[0] & 0xff) == 0x1f && (b[1] & 0xff) == 0x8b;
+    }
+
+    /** Inflates a gzip body, capped to guard against a decompression bomb; null on failure. */
+    private static byte[] gunzip(byte[] b) {
+        try (java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(
+                     new java.io.ByteArrayInputStream(b));
+             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n, total = 0;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+                total += n;
+                if (total > 2_000_000) break;
+            }
+            return out.toByteArray();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** True when a body is (almost) all printable/UTF-8 text rather than binary. */
+    private static boolean isMostlyText(byte[] b) {
+        int limit = Math.min(b.length, 2048);
+        if (limit == 0) return true;
+        int printable = 0;
+        for (int i = 0; i < limit; i++) {
+            int c = b[i] & 0xff;
+            if (c == 9 || c == 10 || c == 13 || c >= 0x20) printable++;
+        }
+        return printable * 100 / limit >= 90;
+    }
+
+    /** First value of a header by case-insensitive name, or null. */
+    private static String headerValue(Map<String, List<String>> headers, String name) {
+        if (headers == null) return null;
+        for (Map.Entry<String, List<String>> e : headers.entrySet()) {
+            if (e.getKey() != null && e.getKey().equalsIgnoreCase(name)
+                    && e.getValue() != null && !e.getValue().isEmpty()) {
+                return e.getValue().get(0);
+            }
+        }
+        return null;
+    }
+
+    /**
      * TLS-terminate with our leaf, then run each HTTP request through a real exchange with
      * the upstream (so we get the decrypted, decoded body), hand it to {@code handler}, and
      * write the handler's response back to the client. One request per connection
@@ -242,6 +367,7 @@ public final class MitmProxy implements AutoCloseable {
 
                 HttpExchange exchange = forward(host, port, method, path, reqHeaders, reqBody);
                 byte[] responseBody = handler.handle(exchange);
+                if (logRequests) logExchange(exchange);
                 writeResponse(out, exchange.status(), exchange.responseContentType(), responseBody);
             }
         } catch (Exception e) {
