@@ -17,10 +17,10 @@ client (`hytale-monitor`).
   there is nothing to refresh.
 - **Mint** — `get-launcher-data` → first profile → `game-session/new`, yielding the
   `sessionToken` + `identityToken` the client needs.
-- **Persist** — store accounts (owner-only) in `accounts.json`, so login is a one-time
-  step. Everything the launcher writes — accounts, captured server params, the MITM CA,
-  settings — lives in a `meridian/` folder **next to the launcher jar**, not the home dir
-  and **not the registry**; delete the jar's folder and nothing is left behind.
+- **Persist** — store accounts **encrypted at rest** (AES-256-GCM) in `accounts.dat`, so
+  login is a one-time step. Everything the launcher writes — accounts, captured server
+  params, the MITM CA, settings — lives in a `meridian/` folder **next to the launcher jar**,
+  not the home dir and **not the registry**; delete the jar's folder and nothing is left behind.
 - **Launch** — start the client with the session in its environment.
 
 Beyond Part 1, the launcher now also drives the proxy so the whole in-game server browser
@@ -57,9 +57,13 @@ them "from environment" — so both the client and its server authenticate off o
 
 ## Accounts & token sharing
 
-The launcher stores several **accounts** (`accounts.json` next to the jar, owner-only) so
-any of them starts in a couple of clicks — pick one from the dropdown (or `--account NAME`)
-and Launch. "Account" is the login; one account can hold several in-game **profiles**
+The launcher stores several **accounts** (`accounts.dat` next to the jar, **encrypted at
+rest**) so any of them starts in a couple of clicks — pick one from the dropdown (or
+`--account NAME`) and Launch. The store holds refresh tokens, so it is sealed with
+AES-256-GCM under a PBKDF2 key derived from — in priority order — `HYTALE_AUTH_KEY_FILE`,
+`HYTALE_AUTH_KEY`, or (default) this machine's hardware id, so copying the file to another
+machine simply forces a re-login. An earlier plaintext `accounts.json` is migrated and
+removed on first run. "Account" is the login; one account can hold several in-game **profiles**
 (distinct `{uuid, username}`), each shown as its own row in the dropdown. On open, the
 launcher refreshes each account's profile list from the account service where the stored
 refresh token still works — so newly added/renamed profiles appear without re-adding.
