@@ -21,8 +21,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * The Hytale account flow: interactive OAuth2 login and non-interactive refresh, each
- * ending in a minted {@link GameSession}. A faithful Java port of the reference Rust
- * launcher client (hytale-monitor) — same endpoints, parameters, and header quirks.
+ * ending in a minted {@link GameSession}. Speaks the same endpoints, parameters and header
+ * quirks as the official launcher.
  *
  * <p>The flow, both paths sharing steps 3–4:
  * <ol>

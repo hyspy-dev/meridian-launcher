@@ -6,9 +6,10 @@ legitimate — own the session mint so the proxy is handed a fresh token instead
 snooping one out of a running game process, keep the player in control of what the
 client does at startup, and lay the groundwork for a community server list later.
 
-Nothing here is an exploit: the account flow is the standard OAuth2 the official
-launcher uses (`client_id=hytale-launcher`), ported faithfully from the reference Rust
-client (`hytale-monitor`).
+Nothing here is an exploit: the account flow is the standard OAuth2 the official launcher
+uses (`client_id=hytale-launcher`, authorization code + PKCE over a loopback redirect),
+implemented against the public endpoints and verified against the official launcher's own
+behaviour.
 
 ## What it does today (Part 1)
 
@@ -24,7 +25,12 @@ client (`hytale-monitor`).
 - **Launch** — start the client with the session in its environment.
 
 Beyond Part 1, the launcher now also drives the proxy so the whole in-game server browser
-routes through it automatically — see **[docs/server-redirect.md](docs/server-redirect.md)**.
+routes through it automatically — see **[docs/server-redirect.md](docs/server-redirect.md)** —
+**installs and updates the game itself** (see *Game versions* below), and **manages proxy
+modules** (see *Modules*).
+
+Windows, macOS and Linux are all supported. Confirmed live on Windows and on an Apple
+Silicon Mac; the Linux path (install, version detection, proxy, CA trust) is verified too.
 
 ## The launch contract
 
@@ -95,33 +101,45 @@ java -jar meridian-launcher-*.jar <command>
   logout  [--account NAME]       remove an account
 ```
 
-The GUI has two tabs — **Launch** (account/profile, version, proxy jar, Use proxy / Block
-telemetry, Launch) and **Servers** (browse Featured / Random / Favorites per captured
-version).
+The GUI has four tabs — **Launch** (account/profile, game version + install/update, proxy
+jar, Use proxy / Block telemetry, Launch), **Modules** (install and toggle proxy modules),
+**Servers** (browse Featured / Random / Favorites per captured version) and **Tools**.
 
 The client path is auto-detected, with `--client <path>` or `-Dmeridian.client=<path>`
 as the override.
 
-## Hytale folder & version
+## Game versions — folder, install, update
 
-You point the launcher at the **Hytale folder** (the root holding `install/` and `data/`;
-`%APPDATA%\Hytale` by default, editable for a custom install) and pick a **version** from
-the dropdown. Versions are the `install/` subfolders that contain a runnable client —
-`pre-release`, `release`, `v0.4`, … — with the active one (from `patchline.json`) first.
+You point the launcher at the **Hytale folder** (the root holding `install/` and `data/`)
+and pick a **version** from the dropdown. Versions are the `install/` subfolders that
+contain a client — `pre-release`, `release`, `v0.4`, … — with the active one (from
+`patchline.json`) first. The root defaults per OS:
 
-Each version resolves to:
+| OS | Default root |
+|----|--------------|
+| Windows | `%APPDATA%\Hytale` |
+| macOS | `~/Library/Application Support/Hytale` |
+| Linux | `~/.local/share/Hytale` |
 
-```
-<root>/install/<version>/package/game/latest/Client/HytaleClient.exe   ← client
-<root>/install/<version>/package/game/latest                            ← --app-dir
-<root>/install/<version>/package/jre/latest/bin/java.exe                ← --java-exec
-<root>/data/<version>                                                   ← --user-dir
-```
+Each version resolves to `<root>/install/<version>/package/game/latest` as `--app-dir`,
+`…/package/jre/latest/bin/java` as `--java-exec` and `<root>/data/<version>` as
+`--user-dir`. The client sits under `game/latest/Client/`, where each platform has its own
+shape — `HytaleClient.exe` on Windows, `HytaleClient` on Linux, and
+`Hytale.app/Contents/MacOS/HytaleClient` on macOS. The launcher takes the path from the
+install's own `env.dat` when it points at a file that is really there, and otherwise falls
+back to those known layouts, so a version never silently disappears from the dropdown.
 
 The per-version `--user-dir` means different versions keep separate saves/settings.
 CLI selectors: `--hytale <root> --version <name>` (or `--client <exe>` to point straight
-at an executable). Verified against a real install on Windows; macOS/Linux use the
-equivalent `Application Support` / `~/.local/share` roots (best-effort).
+at an executable).
+
+**Install and update.** *Install version…* lists the channels your account is entitled to
+and installs one from scratch; *Update* appears only when the selected version has a newer
+build. Both use the game's own delta format (wharf `.pwr`), applied into a staging tree and
+swapped in atomically, with file permissions restored from the patch — the executable bit
+included, which is what a Unix client needs to start at all. A fresh install also
+provisions a Java runtime: copied from another installed channel when there is one, else
+downloaded.
 
 ## Server redirect (Use proxy)
 
@@ -135,6 +153,25 @@ server in-game — its gameplay UDP flows through the proxy automatically.
 Full mechanism, manual servers, and token handling: **[docs/server-redirect.md](docs/server-redirect.md)**.
 Servers not in the browser are handled in the proxy's own Connect bar (Direct-Connect to
 `localhost`), the same UI as running the proxy standalone.
+
+## Modules
+
+The **Modules** tab installs proxy modules from the Meridian catalog and turns them on and
+off — per *scope*: a shared default set, or a set for one server (`<host_port>/modules`).
+
+The launcher keeps what it installs in its own `store/` (next to the jar) and never puts
+jars in the proxy's module folders: those belong to you and to anyone running the proxy
+standalone. Instead it writes a generated `modules.json` there, listing the store jars the
+proxy should also load. The proxy checks each entry against the jar itself and ignores one
+that no longer matches — and if a hand-placed jar in the folder declares the same module, the
+**folder wins**. "Add from file…" copies a jar into the folder as usual and stays yours.
+
+A protocol-bound module ships one build per game line, and they can sit side by side: every
+jar carries the wire protocol it was built for (written by the build, not by the module
+author), and the proxy loads the one it speaks. So switching game version needs no
+reinstall — and several proxies, even on different versions, can run from the same folders
+at once. When a version you switch to has no build yet, the launcher says so up front and
+fetches it at launch.
 
 ## Part 2 — telemetry / server list
 
@@ -183,18 +220,29 @@ java -jar meridian-launcher-*.jar probe          # server-discovery + mod-browse
 java -jar meridian-launcher-*.jar probe --host server-discovery.hytale.com
 ```
 
-`probe` installs the CA into the current user's trust store (Windows: `CurrentUser\Root`,
-no admin; other OSes: pointed at via `SSL_CERT_FILE` in the launch env), MITMs the target
-hosts, launches the game, and — after you open the server browser and quit — reports per
-host:
+`probe` makes the CA trusted, MITMs the target hosts, launches the game, and — after you
+open the server browser and quit — reports per host:
 
 - **INTERCEPTABLE** — the client trusted our cert; injection is possible.
 - **PINNED / rejected** — the client refused our cert; injection is not possible for that
   host.
 
-The CA is removed again at the end unless `--keep-ca` is given. Cross-platform: cert
-minting and the proxy are pure Java; only the CA-trust step is per-OS (Windows now, the
-Linux `SSL_CERT_FILE` path already wired, macOS login-keychain later).
+The CA is removed again at the end unless `--keep-ca` is given.
+
+### Trusting the CA, per OS
+
+Cert minting and the proxy itself are pure Java; only *trust* is platform-specific, because
+the client validates through a different backend on each OS:
+
+| OS | How the CA is trusted | Left behind? |
+|----|-----------------------|--------------|
+| Windows | installed into `CurrentUser\Root` (`certutil`, no admin) | removed when the last game window exits |
+| macOS | added to your **login keychain** as a trusted root (`security add-trusted-cert`, no `sudo`; the usual keychain prompt appears once) | removed when the last game window exits |
+| Linux | **nothing is installed** — the launcher builds a bundle of the system roots plus our CA and points the client at it with `SSL_CERT_FILE` | nothing: the variable lives only as long as that game process |
+
+The system roots are included in the Linux bundle on purpose: `SSL_CERT_FILE` *replaces*
+the default bundle rather than adding to it, and the proxy tunnels (rather than intercepts)
+every host it is not asked to MITM — those still have to validate normally.
 
 Once a host proves INTERCEPTABLE, response rewriting (adding community servers) slots into
 the MITM relay.

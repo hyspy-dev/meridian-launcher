@@ -16,7 +16,7 @@
       of a running game process. A standalone component, not a proxy Layer-2 module.
 
       Deliberately self-contained: JDK HTTP client + Gson, no proxy dependency. The
-      account flow is a faithful port of the reference Rust client (hytale-monitor).
+      account flow is the official launcher's own OAuth2 (authorization code + PKCE).
     -->
     <properties>
         <maven.compiler.source>22</maven.compiler.source>

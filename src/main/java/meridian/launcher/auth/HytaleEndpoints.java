@@ -3,9 +3,8 @@ package meridian.launcher.auth;
 /**
  * Hytale account/session backend endpoints and the OAuth client identity.
  *
- * <p>Values are taken verbatim from the reference Rust launcher client; the launcher
- * presents itself as {@code hytale-launcher}, the same OAuth client id the official
- * launcher uses, so the account backend issues launcher-scoped tokens.
+ * <p>The launcher presents itself as {@code hytale-launcher}, the same OAuth client id the
+ * official launcher uses, so the account backend issues launcher-scoped tokens.
  */
 public final class HytaleEndpoints {
 
