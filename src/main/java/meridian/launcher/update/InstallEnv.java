@@ -52,11 +52,16 @@ public final class InstallEnv {
         return new Platform(p.get("os").getAsString(), p.get("arch").getAsString());
     }
 
-    /** This machine's platform in Hytale's terms — for channels that aren't installed yet. */
+    /**
+     * This machine's platform in Hytale's terms — for channels that aren't installed yet.
+     * The update API spells the Apple platform {@code darwin/arm64} (verified against the live
+     * API: {@code macos} returns channels with no builds at all, and its patch set 404s);
+     * Apple Silicon only, there is no Intel mac build.
+     */
     public static Platform currentPlatform() {
         String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
         String hytaleOs = os.contains("win") ? "windows"
-                : (os.contains("mac") || os.contains("darwin")) ? "macos" : "linux";
+                : (os.contains("mac") || os.contains("darwin")) ? "darwin" : "linux";
         String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
         String hytaleArch = (arch.contains("aarch64") || arch.contains("arm64")) ? "arm64" : "amd64";
         return new Platform(hytaleOs, hytaleArch);
@@ -141,9 +146,14 @@ public final class InstallEnv {
         platform.addProperty("arch", pf.arch());
         env.add("platform", platform);
 
+        // Each platform ships the client in its own shape — macOS puts it inside an app bundle.
+        String clientBinary = switch (pf.os()) {
+            case "windows" -> "Client\\HytaleClient.exe";
+            case "darwin" -> "Client/Hytale.app/Contents/MacOS/HytaleClient";
+            default -> "Client/HytaleClient";
+        };
         JsonObject deps = new JsonObject();
-        deps.add("game", singleEntry(label, entry(label, build,
-                windows ? "Client\\HytaleClient.exe" : "Client/HytaleClient",
+        deps.add("game", singleEntry(label, entry(label, build, clientBinary,
                 pkg.resolve("game").resolve("latest").toString(), assetsSize)));
         deps.add("jre", singleEntry("copied", entry("copied", 0,
                 windows ? "bin\\java.exe" : "bin/java",

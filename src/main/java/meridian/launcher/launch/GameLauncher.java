@@ -60,6 +60,7 @@ public final class GameLauncher {
         if (!install.isRunnable()) {
             throw new IOException("Client executable not found or not runnable: " + install.executable);
         }
+        ensureExecutable(install.executable);
 
         // Note: --name MUST equal the identity token's username, or the client refuses to start
         // with "Identity token username mismatch" — the display name can't be substituted.
@@ -70,6 +71,7 @@ public final class GameLauncher {
 
         ProcessBuilder pb = new ProcessBuilder(command);
         Path clientDir = install.executable.getParent();
+        // (see ensureExecutable below — the client may arrive without its permission bits)
         pb.directory(clientDir != null ? clientDir.toFile() : null);
         pb.inheritIO();
 
@@ -87,5 +89,32 @@ public final class GameLauncher {
                 install.executable.getFileName(), session.profileUsername,
                 session.profileUuid, install.version);
         return pb.start();
+    }
+
+    /**
+     * Makes sure the client carries its execute bit on Unix. A tree can arrive without one —
+     * unpacked by a tool that drops permissions, copied across filesystems, or installed by an
+     * older build of this launcher, which restored file contents but not their modes. The
+     * failure it causes ({@code Exec failed … Permission denied}) says nothing about the cause,
+     * so the launcher repairs it instead of forwarding the riddle to the user.
+     */
+    private static void ensureExecutable(Path exe) {
+        if (Files.isExecutable(exe)) return;
+        var view = Files.getFileAttributeView(exe, java.nio.file.attribute.PosixFileAttributeView.class);
+        if (view == null) return;   // Windows has no execute bit to set
+        try {
+            var perms = java.util.EnumSet.copyOf(Files.getPosixFilePermissions(exe));
+            perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE);
+            if (perms.contains(java.nio.file.attribute.PosixFilePermission.GROUP_READ)) {
+                perms.add(java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE);
+            }
+            if (perms.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ)) {
+                perms.add(java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE);
+            }
+            view.setPermissions(perms);
+            log.info("Set the execute bit on {} (it was missing).", exe);
+        } catch (Exception e) {
+            log.warn("Could not set the execute bit on {}: {}", exe, e.toString());
+        }
     }
 }

@@ -259,7 +259,7 @@ public final class JreProvisioner {
     private static String adoptiumOs(String hytaleOs) {
         return switch (hytaleOs) {
             case "windows" -> "windows";
-            case "macos" -> "mac";
+            case "darwin", "macos" -> "mac";   // Hytale says darwin; macos kept for old env.dat
             default -> "linux";
         };
     }

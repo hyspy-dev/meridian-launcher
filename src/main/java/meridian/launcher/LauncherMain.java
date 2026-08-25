@@ -23,7 +23,7 @@ import meridian.launcher.mitm.CertificateAuthority;
 import meridian.launcher.mitm.ExchangeDumper;
 import meridian.launcher.mitm.ExchangeHandler;
 import meridian.launcher.mitm.MitmProxy;
-import meridian.launcher.mitm.WindowsCaTrust;
+import meridian.launcher.mitm.CaTrust;
 import meridian.launcher.launch.GameLauncher;
 import meridian.launcher.launch.HytaleInstall;
 import meridian.launcher.launch.HytaleRoot;
@@ -211,14 +211,14 @@ public final class LauncherMain {
 
         Path caDir = AppPaths.resolve("ca");
         CertificateAuthority ca = CertificateAuthority.loadOrCreate(caDir);
+        CaTrust caTrust = CaTrust.forThisOs();
         boolean caInstalled = false;
-        if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(ca.caCertificate())) {
-            WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
+        if (caTrust.installs() && !caTrust.isInstalled(ca.caCertificate())) {
+            caTrust.install(caDir.resolve("meridian-ca.crt"));
             caInstalled = true;
-            System.out.println("Installed the probe CA into the current user's trust store.");
-        } else if (!WindowsCaTrust.isWindows()) {
-            System.out.println("Non-Windows: point the client at the CA via SSL_CERT_FILE="
-                    + caDir.resolve("meridian-ca.crt") + " (set in the launch env).");
+            System.out.println("Trusted the probe CA — " + caTrust.describe() + ".");
+        } else {
+            System.out.println("CA trust: " + caTrust.describe() + ".");
         }
 
         GameSession session = acquireSession(SessionProvider.withDefaults(), args);
@@ -230,9 +230,7 @@ public final class LauncherMain {
             Map<String, String> env = new java.util.HashMap<>(Map.of(
                     "HTTP_PROXY", proxyUrl, "HTTPS_PROXY", proxyUrl, "ALL_PROXY", proxyUrl,
                     "http_proxy", proxyUrl, "https_proxy", proxyUrl, "all_proxy", proxyUrl));
-            if (!WindowsCaTrust.isWindows()) {
-                env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
-            }
+            env.putAll(caTrust.launchEnv(caDir.resolve("meridian-ca.crt"), caDir));
 
             System.out.println("MITM proxy on " + proxyUrl + " — intercepting " + hosts);
             System.out.println("Open the server browser (and the mod browser) in-game, then quit.");
@@ -251,7 +249,7 @@ public final class LauncherMain {
         } finally {
             if (caInstalled && !hasFlag(args, "--keep-ca")) {
                 try {
-                    WindowsCaTrust.uninstall(ca.caCertificate());
+                    caTrust.uninstall(ca.caCertificate());
                     System.out.println("Removed the probe CA from the trust store.");
                 } catch (Exception e) {
                     System.out.println("Could not remove the probe CA automatically: " + e.getMessage()
@@ -280,11 +278,12 @@ public final class LauncherMain {
 
         Path caDir = AppPaths.resolve("ca");
         CertificateAuthority ca = CertificateAuthority.loadOrCreate(caDir);
+        CaTrust caTrust = CaTrust.forThisOs();
         boolean caInstalled = false;
-        if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(ca.caCertificate())) {
-            WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
+        if (caTrust.installs() && !caTrust.isInstalled(ca.caCertificate())) {
+            caTrust.install(caDir.resolve("meridian-ca.crt"));
             caInstalled = true;
-            System.out.println("Installed the observe CA into the current user's trust store.");
+            System.out.println("Trusted the observe CA — " + caTrust.describe() + ".");
         }
 
         Path dumpDir = AppPaths.resolve("dumps").resolve("run-" + System.currentTimeMillis());
@@ -301,9 +300,7 @@ public final class LauncherMain {
             Map<String, String> env = new java.util.HashMap<>(Map.of(
                     "HTTP_PROXY", proxyUrl, "HTTPS_PROXY", proxyUrl, "ALL_PROXY", proxyUrl,
                     "http_proxy", proxyUrl, "https_proxy", proxyUrl, "all_proxy", proxyUrl));
-            if (!WindowsCaTrust.isWindows()) {
-                env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
-            }
+            env.putAll(caTrust.launchEnv(caDir.resolve("meridian-ca.crt"), caDir));
 
             System.out.println("Observing " + hosts + " — dumps → " + dumpDir);
             System.out.println("Reproduce the issue (e.g. open a second window), then quit the game.");
@@ -313,7 +310,7 @@ public final class LauncherMain {
         } finally {
             if (caInstalled && !hasFlag(args, "--keep-ca")) {
                 try {
-                    WindowsCaTrust.uninstall(ca.caCertificate());
+                    caTrust.uninstall(ca.caCertificate());
                     System.out.println("Removed the observe CA from the trust store.");
                 } catch (Exception e) {
                     System.out.println("Could not remove the CA automatically: " + e.getMessage());
@@ -335,11 +332,12 @@ public final class LauncherMain {
 
         Path caDir = AppPaths.resolve("ca");
         CertificateAuthority ca = CertificateAuthority.loadOrCreate(caDir);
+        CaTrust caTrust = CaTrust.forThisOs();
         boolean caInstalled = false;
-        if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(ca.caCertificate())) {
-            WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
+        if (caTrust.installs() && !caTrust.isInstalled(ca.caCertificate())) {
+            caTrust.install(caDir.resolve("meridian-ca.crt"));
             caInstalled = true;
-            System.out.println("Installed the capture CA into the current user's trust store.");
+            System.out.println("Trusted the capture CA — " + caTrust.describe() + ".");
         }
 
         ServerParamsStore store = ServerParamsStore.defaultStore();
@@ -354,9 +352,7 @@ public final class LauncherMain {
             Map<String, String> env = new java.util.HashMap<>(Map.of(
                     "HTTP_PROXY", proxyUrl, "HTTPS_PROXY", proxyUrl, "ALL_PROXY", proxyUrl,
                     "http_proxy", proxyUrl, "https_proxy", proxyUrl, "all_proxy", proxyUrl));
-            if (!WindowsCaTrust.isWindows()) {
-                env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
-            }
+            env.putAll(caTrust.launchEnv(caDir.resolve("meridian-ca.crt"), caDir));
             System.out.println("Capturing server params for " + gameVersion
                     + " — open the in-game Servers browser (and its random list), then quit.");
             Process process = new GameLauncher(install).launch(session, env, List.of());
@@ -364,7 +360,7 @@ public final class LauncherMain {
         } finally {
             if (caInstalled && !hasFlag(args, "--keep-ca")) {
                 try {
-                    WindowsCaTrust.uninstall(ca.caCertificate());
+                    caTrust.uninstall(ca.caCertificate());
                     System.out.println("Removed the capture CA from the trust store.");
                 } catch (Exception e) {
                     System.out.println("Could not remove the CA automatically: " + e.getMessage());

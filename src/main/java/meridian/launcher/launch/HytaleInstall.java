@@ -2,6 +2,7 @@ package meridian.launcher.launch;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -13,9 +14,11 @@ import com.google.gson.JsonParser;
  * and a version name. The install tree is:
  *
  * <pre>
- *   &lt;root&gt;/                                    e.g. %APPDATA%/Hytale
+ *   &lt;root&gt;/            %APPDATA%/Hytale · ~/Library/Application Support/Hytale · ~/.local/share/Hytale
  *     install/&lt;version&gt;/package/
- *       game/latest/Client/HytaleClient.exe    ← executable
+ *       game/latest/Client/HytaleClient.exe    ← executable (Windows)
+ *                   Client/HytaleClient        ←   …Linux
+ *                   Client/Hytale.app/Contents/MacOS/HytaleClient  ←   …macOS
  *       game/latest                            ← --app-dir
  *       jre/latest/bin/java.exe                ← --java-exec
  *     data/&lt;version&gt;/                            ← --user-dir (per version)
@@ -64,12 +67,51 @@ public final class HytaleInstall {
         Path userDir = root.resolve("data").resolve(version);
 
         JsonObject env = readEnv(root.resolve("install").resolve(version).resolve("env.dat"));
-        String gameBinary = binaryFor(env, "game", "Client/" + defaultClientName());
+        String gameBinary = binaryFor(env, "game", null);
         String jreBinary = binaryFor(env, "jre", "bin/" + defaultJavaName());
 
-        Path executable = resolveRelative(appDir, gameBinary);
+        Path executable = locateClient(appDir, gameBinary);
         Path javaExec = resolveRelative(jreDir, jreBinary);
         return new HytaleInstall(root, version, executable, appDir, userDir, javaExec);
+    }
+
+    /**
+     * The client executable under {@code appDir}. {@code env.dat}'s own {@code binary} wins when
+     * it points at a file that is really there; otherwise the known per-OS layouts are tried,
+     * then a shallow search. The layouts differ more than the name does — on macOS the binary
+     * lives inside an app bundle ({@code Client/Hytale.app/Contents/MacOS/HytaleClient}), so a
+     * missing or foreign env.dat used to make the whole version invisible in the launcher.
+     */
+    private static Path locateClient(Path appDir, String envBinary) {
+        List<String> candidates = new ArrayList<>();
+        if (envBinary != null && !envBinary.isBlank()) candidates.add(envBinary);
+        candidates.add("Client/" + CLIENT_EXE);                          // Windows
+        candidates.add("Client/" + CLIENT_BIN);                          // Linux
+        candidates.add("Client/Hytale.app/Contents/MacOS/" + CLIENT_BIN);   // macOS bundle
+        for (String c : candidates) {
+            Path p = resolveRelative(appDir, c);
+            if (Files.isRegularFile(p)) return p;
+        }
+        Path found = searchForClient(appDir);
+        if (found != null) return found;
+        // Nothing on disk: keep the most meaningful path so errors name the expected location.
+        return resolveRelative(appDir, candidates.get(0));
+    }
+
+    /** Last resort: look for the client a few levels under {@code <appDir>/Client}. */
+    private static Path searchForClient(Path appDir) {
+        Path clientDir = appDir.resolve("Client");
+        if (!Files.isDirectory(clientDir)) return null;
+        try (var walk = Files.walk(clientDir, 5)) {
+            return walk.filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String n = p.getFileName().toString();
+                        return n.equals(CLIENT_EXE) || n.equals(CLIENT_BIN);
+                    })
+                    .findFirst().orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** env.dat's {@code dependency_versions.<dep>.<ver>.binary}, or {@code fallback}. */
@@ -123,8 +165,14 @@ public final class HytaleInstall {
         return of(root, versionDir.getFileName().toString());
     }
 
+    /**
+     * Whether this version can be offered in the launcher. Existence is the test, not the
+     * executable bit: a tree copied without permissions (or sitting on a filesystem that does
+     * not carry them) still is that version, and a launch failure says so far more clearly than
+     * the version silently vanishing from the dropdown.
+     */
     public boolean isRunnable() {
-        return Files.isExecutable(executable);
+        return Files.isRegularFile(executable);
     }
 
     /** The authenticated-launch arguments the client expects, in the launcher's order. */
@@ -136,11 +184,6 @@ public final class HytaleInstall {
                 "--auth-mode", "authenticated",
                 "--uuid", uuid,
                 "--name", name);
-    }
-
-    /** Fallback client name when env.dat is unreadable (older installs / snapshots). */
-    private static String defaultClientName() {
-        return isWindows() ? CLIENT_EXE : CLIENT_BIN;
     }
 
     private static String defaultJavaName() {

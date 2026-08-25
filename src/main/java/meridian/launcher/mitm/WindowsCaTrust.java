@@ -10,19 +10,24 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Installs and removes the MITM CA in the Windows per-user trust store.
+ * Windows backend: the MITM CA goes into the per-user trust store.
  *
  * <p>Uses {@code certutil -user -addstore Root}, which writes to {@code CurrentUser\Root}
  * and needs no administrator rights — the trust is scoped to this user, not the machine.
- * This is the Windows backend of what is, on Linux, just an {@code SSL_CERT_FILE} env var
- * set on the launched client; the interface is kept per-OS on purpose.
+ * The client validates through WinHTTP and that store, so unlike Linux there is no
+ * environment-only route: the CA really has to be installed, and taken back out afterwards.
  */
-public final class WindowsCaTrust {
+public final class WindowsCaTrust implements CaTrust {
 
     private static final Logger log = LoggerFactory.getLogger(WindowsCaTrust.class);
     private static final String STORE = "Root";
 
-    private WindowsCaTrust() {
+    public WindowsCaTrust() {
+    }
+
+    @Override
+    public String describe() {
+        return "CurrentUser\\Root store (certutil)";
     }
 
     /** Whether this backend applies to the current OS. */
@@ -31,20 +36,23 @@ public final class WindowsCaTrust {
     }
 
     /** Installs {@code caFile} (a PEM/DER cert) into the current user's Root store. */
-    public static void install(Path caFile) throws Exception {
+    @Override
+    public void install(Path caFile) throws Exception {
         run("Installing CA into CurrentUser\\Root",
                 List.of("certutil", "-user", "-addstore", "-f", STORE, caFile.toString()));
     }
 
     /** Removes the CA from the current user's Root store, by its SHA-1 thumbprint. */
-    public static void uninstall(X509Certificate ca) throws Exception {
+    @Override
+    public void uninstall(X509Certificate ca) throws Exception {
         String thumbprint = sha1Thumbprint(ca);
         run("Removing CA from CurrentUser\\Root",
                 List.of("certutil", "-user", "-delstore", STORE, thumbprint));
     }
 
     /** True if a cert with this thumbprint is already in the user's Root store. */
-    public static boolean isInstalled(X509Certificate ca) {
+    @Override
+    public boolean isInstalled(X509Certificate ca) {
         try {
             String thumbprint = sha1Thumbprint(ca);
             Process p = new ProcessBuilder("certutil", "-user", "-verifystore", STORE, thumbprint)

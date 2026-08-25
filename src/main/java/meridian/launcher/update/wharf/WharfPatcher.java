@@ -70,6 +70,7 @@ public final class WharfPatcher {
                         throw new IOException("file '" + tf.path() + "' rebuilt to " + written
                                 + " bytes, expected " + tf.size());
                     }
+                    applyMode(resolve(stagingDir, tf.path()), tf.mode());
                 }
             } finally {
                 for (FileChannel ch : sources.values()) {
@@ -143,6 +144,32 @@ public final class WharfPatcher {
             cache.put(index, ch);
         }
         return ch;
+    }
+
+    /**
+     * Restores a file's Unix permissions from the container entry. Without this, everything the
+     * updater installs on Linux/macOS comes out non-executable and the game cannot start
+     * ("Exec failed … Permission denied"); on Windows there is no POSIX view and this is a no-op.
+     */
+    private static void applyMode(Path file, long mode) {
+        int bits = (int) (mode & 0777);
+        if (bits == 0) return;
+        var view = Files.getFileAttributeView(file, java.nio.file.attribute.PosixFileAttributeView.class);
+        if (view == null) return;   // Windows
+        try {
+            view.setPermissions(permissionsOf(bits));
+        } catch (IOException e) {
+            log.warn("Could not set permissions on {}: {}", file, e.toString());
+        }
+    }
+
+    private static java.util.Set<java.nio.file.attribute.PosixFilePermission> permissionsOf(int bits) {
+        var perms = java.util.EnumSet.noneOf(java.nio.file.attribute.PosixFilePermission.class);
+        var all = java.nio.file.attribute.PosixFilePermission.values();   // OWNER_READ … OTHERS_EXECUTE
+        for (int i = 0; i < all.length; i++) {
+            if ((bits & (0400 >> i)) != 0) perms.add(all[i]);
+        }
+        return perms;
     }
 
     private static void createSymlink(Path stagingDir, Wharf.SymlinkEntry s) {

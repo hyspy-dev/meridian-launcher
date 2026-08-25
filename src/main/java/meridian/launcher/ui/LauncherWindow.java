@@ -44,7 +44,6 @@ import meridian.launcher.launch.ProxyLauncher;
 import meridian.launcher.mitm.CertificateAuthority;
 import meridian.launcher.mitm.ExchangeHandler;
 import meridian.launcher.mitm.MitmProxy;
-import meridian.launcher.mitm.WindowsCaTrust;
 
 /**
  * The launcher's window: sign in, see who you are signed in as, point at the client, and
@@ -83,6 +82,7 @@ public final class LauncherWindow {
     // is using it, and uninstalled only when the LAST such window exits (not the first to close).
     private final java.util.concurrent.atomic.AtomicInteger caUsers = new java.util.concurrent.atomic.AtomicInteger();
     private volatile boolean caInstalledByUs;
+    private final meridian.launcher.mitm.CaTrust caTrust = meridian.launcher.mitm.CaTrust.forThisOs();
     // Dedicated append-only file for "Log all HTTPS requests" — the launcher's own slf4j-simple
     // output goes to stderr, which is invisible for a GUI (javaw) process.
     private java.io.PrintWriter httpRequestLog;
@@ -1079,9 +1079,16 @@ public final class LauncherWindow {
                     caUsers.incrementAndGet();   // hold the CA installed until the last window exits
                     Path caDir = meridian.launcher.AppPaths.resolve("ca");
                     captureCa = CertificateAuthority.loadOrCreate(caDir);
-                    if (WindowsCaTrust.isWindows() && !WindowsCaTrust.isInstalled(captureCa.caCertificate())) {
-                        WindowsCaTrust.install(caDir.resolve("meridian-ca.crt"));
+                    // Per-OS trust: Windows/macOS install into a store (and we take it back out
+                    // when the last window closes); Linux needs no install at all — the CA rides
+                    // along in the client's environment (see CaTrust).
+                    if (caTrust.installs() && !caTrust.isInstalled(captureCa.caCertificate())) {
+                        caTrust.install(caDir.resolve("meridian-ca.crt"));
                         caInstalledByUs = true;
+                        appendAsync("Trusted the Meridian CA — " + caTrust.describe()
+                                + "; removed again when the last game window closes.");
+                    } else if (!caTrust.installs()) {
+                        appendAsync("CA trust: " + caTrust.describe() + ".");
                     }
                     Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
                     if (useProxy) {
@@ -1104,9 +1111,7 @@ public final class LauncherWindow {
                     mitm.start();
                     proxy = mitm;
                     env = proxyEnv("http://127.0.0.1:" + mitm.port());
-                    if (!WindowsCaTrust.isWindows()) {
-                        env.put("SSL_CERT_FILE", caDir.resolve("meridian-ca.crt").toString());
-                    }
+                    env.putAll(caTrust.launchEnv(caDir.resolve("meridian-ca.crt"), caDir));
                     String on = useProxy
                             ? "Proxy ON — " + proxyJar.getFileName() + " (multiplex); server list redirected through it"
                             : "HTTPS request logging ON — MITM-decrypting the game's HTTPS";
@@ -1151,7 +1156,7 @@ public final class LauncherWindow {
                 // one of several open game windows would strip the cert the others still need.
                 if (usedCa && caUsers.decrementAndGet() == 0 && caInstalledByUs && captureCa != null) {
                     try {
-                        WindowsCaTrust.uninstall(captureCa.caCertificate());
+                        caTrust.uninstall(captureCa.caCertificate());
                         caInstalledByUs = false;
                     } catch (Exception ignored) {
                     }
