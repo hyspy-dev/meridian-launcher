@@ -23,6 +23,18 @@ public final class RouteRegistry {
     /** First local port handed out; well above ephemeral/OS ranges, below 65535 with headroom. */
     public static final int DEFAULT_BASE_PORT = 16000;
 
+    /** Ports one instance may hand out before colliding with the next slot's base. */
+    private static final int SLOT_SIZE = 1000;
+    private static final int SLOTS = 48;   // 16000 + 48*1000 = 64000, still under 65535
+
+    /**
+     * Each concurrent launch gets its own port slot: every Play starts its own proxy process,
+     * and two registries starting from the same base would tell both proxies to bind the same
+     * UDP ports. Seeded randomly so two separate launcher processes rarely collide either.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger NEXT_SLOT =
+            new java.util.concurrent.atomic.AtomicInteger(new java.util.Random().nextInt(SLOTS));
+
     private final RouteSink sink;
     private final Map<String, Integer> assigned = new LinkedHashMap<>();
     private int nextPort;
@@ -32,8 +44,10 @@ public final class RouteRegistry {
         this.sink = sink;
     }
 
+    /** A registry on its own per-instance port slot — safe for concurrent game launches. */
     public static RouteRegistry create(RouteSink sink) {
-        return new RouteRegistry(DEFAULT_BASE_PORT, sink);
+        int slot = Math.floorMod(NEXT_SLOT.getAndIncrement(), SLOTS);
+        return new RouteRegistry(DEFAULT_BASE_PORT + slot * SLOT_SIZE, sink);
     }
 
     /**

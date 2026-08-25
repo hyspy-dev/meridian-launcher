@@ -1,0 +1,22 @@
+# Release on a version tag (vX.Y.Z): delegates to the shared workflow in hyspy-dev/meridian.
+# Game support is derived automatically: if this repo's pom depends on meridian-protocol, one
+# jar is built per protocol line/<game> branch — from this repo's own line/<game> branch when
+# the source diverges for that line, else from the tagged commit; a line that does not compile
+# is skipped with a warning. No protocol dependency = a single game-neutral Layer-2 jar.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release
+
+jobs:
+  release:
+    uses: hyspy-dev/meridian/.github/workflows/release-component.yml@main
+    with:
+      artifact_glob: target/meridian-launcher-*.jar
+      kind: launcher
+    secrets:
+      dispatch_token: ${{ secrets.CATALOG_DISPATCH_TOKEN }}

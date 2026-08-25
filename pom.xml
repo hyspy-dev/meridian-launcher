@@ -69,6 +69,20 @@
 
     <build>
         <finalName>meridian-launcher-${project.version}</finalName>
+        <resources>
+            <!-- Stamp the build version into version.properties (Maven filtering) so the launcher
+                 knows its own version for the update check. Other resources are copied verbatim. -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes><include>version.properties</include></includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes><exclude>version.properties</exclude></excludes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

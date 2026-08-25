@@ -74,6 +74,7 @@ public final class LauncherWindow {
     private JTextField clientField;              // the Hytale root folder
     private javax.swing.JComboBox<String> versionBox;
     private javax.swing.JComboBox<ProxyItem> proxyBox;
+    private JButton getProxyButton;
     private javax.swing.JCheckBox useProxyCheck;
     private javax.swing.JCheckBox blockTelemetryCheck;
     private javax.swing.JCheckBox logRequestsCheck;
@@ -95,6 +96,7 @@ public final class LauncherWindow {
     private volatile boolean patchlinesFetching;
     private String patchlineAccount;          // account id the patchline cache was fetched for
     private ServersPanel serversPanel;
+    private ModulesPanel modulesPanel;
 
     private final meridian.launcher.Settings settings = meridian.launcher.Settings.defaultSettings();
     private static final String PREF_BLOCK_TELEMETRY = "blockTelemetry";
@@ -181,13 +183,25 @@ public final class LauncherWindow {
             return inst == null ? null : HytaleRoot.gameVersion(inst.root, inst.version);
         }, this::installedGameVersions);
 
+        modulesPanel = new ModulesPanel(() -> {
+            Path jar = selectedProxyJar();
+            return jar != null && jar.getParent() != null
+                    ? jar.getParent() : meridian.launcher.AppPaths.launcherDir();
+        }, () -> {
+            HytaleInstall inst = selectedInstall();
+            return inst == null ? null : HytaleRoot.gameVersion(inst.root, inst.version);
+        });
+
         javax.swing.JTabbedPane tabs = new javax.swing.JTabbedPane();
         tabs.addTab("Launch", launchTab);
+        tabs.addTab("Modules", modulesPanel);
         tabs.addTab("Servers", serversPanel);
         tabs.addTab("Tools", new ToolsPanel(provider, this::openBrowser));
         tabs.addChangeListener(e -> {
             if (tabs.getSelectedComponent() == serversPanel) {
                 serversPanel.ensureLoaded();
+            } else if (tabs.getSelectedComponent() == modulesPanel) {
+                modulesPanel.refresh();
             }
         });
 
@@ -201,6 +215,7 @@ public final class LauncherWindow {
         reloadProxies();
         reloadAccounts();
         refreshProfilesOnOpen();
+        checkLauncherUpdate();
     }
 
     /** Fills the proxy dropdown from jars next to the launcher; enabled with "Use proxy". */
@@ -220,6 +235,157 @@ public final class LauncherWindow {
     private java.nio.file.Path selectedProxyJar() {
         ProxyItem item = proxyBox == null ? null : (ProxyItem) proxyBox.getSelectedItem();
         return item == null ? null : item.jar();
+    }
+
+    /** Selects the proxy dropdown entry for {@code jar} (by file name), if present. */
+    private void selectProxy(java.nio.file.Path jar) {
+        if (proxyBox == null || jar == null) return;
+        for (int i = 0; i < proxyBox.getItemCount(); i++) {
+            ProxyItem it = proxyBox.getItemAt(i);
+            if (it != null && it.jar() != null
+                    && it.jar().getFileName().equals(jar.getFileName())) {
+                proxyBox.setSelectedIndex(i);
+                return;
+            }
+        }
+    }
+
+    /** Downloads the proxy build matching the selected version's game, next to the launcher. */
+    private void getProxy() {
+        HytaleInstall install = selectedInstall();
+        if (install == null) {
+            append("Select a version first — the proxy is matched to its game version.");
+            return;
+        }
+        String g = HytaleRoot.gameVersion(install.root, install.version);
+        final String gv = g != null ? g : install.version;
+        setBusy(true, "Finding proxy for " + gv + "…");
+        Thread.startVirtualThread(() -> {
+            try {
+                meridian.launcher.modules.ProxyProvisioner prov =
+                        new meridian.launcher.modules.ProxyProvisioner(new meridian.launcher.modules.ModuleCatalog());
+                meridian.launcher.modules.ModuleCatalog.EndAppVersion proxy = prov.resolve(gv);
+                if (proxy == null) {
+                    appendAsync("No proxy build available for " + gv + " yet.");
+                    setBusyAsync(false, null);
+                    return;
+                }
+                appendAsync("Downloading proxy " + proxy.version() + " (" + proxy.jarName() + ")…");
+                java.nio.file.Path jar = prov.download(proxy, null);
+                appendAsync("Proxy installed: " + jar.getFileName());
+                SwingUtilities.invokeLater(() -> {
+                    if (useProxyCheck != null) useProxyCheck.setSelected(true);
+                    reloadProxies();
+                    selectProxy(jar);
+                    if (proxyBox != null) proxyBox.setEnabled(true);
+                });
+                setBusyAsync(false, null);
+            } catch (Exception e) {
+                appendAsync("Get proxy failed: " + e.getMessage());
+                setBusyAsync(false, null);
+            }
+        });
+    }
+
+    /**
+     * When the selected version changes: tells the user which managed modules have no build for
+     * that game version yet (they are fetched automatically at launch). Off the EDT; quiet when
+     * everything is already present.
+     */
+    private void noteMissingModuleBuilds() {
+        Path proxyJar = selectedProxyJar();
+        Path proxyDir = proxyJar != null && proxyJar.getParent() != null ? proxyJar.getParent() : null;
+        HytaleInstall install = selectedInstall();
+        if (proxyDir == null || install == null) return;
+        Thread.startVirtualThread(() -> {
+            String gv = HytaleRoot.gameVersion(install.root, install.version);
+            if (gv == null) return;
+            java.util.Set<String> missing = new java.util.TreeSet<>(
+                    meridian.launcher.modules.ManagedModules.missingFor(proxyDir.resolve("modules"), gv));
+            try (java.util.stream.Stream<Path> dirs = java.nio.file.Files.list(proxyDir)) {
+                dirs.filter(java.nio.file.Files::isDirectory)
+                        .map(d -> d.resolve("modules"))
+                        .filter(java.nio.file.Files::isDirectory)
+                        .forEach(m -> missing.addAll(
+                                meridian.launcher.modules.ManagedModules.missingFor(m, gv)));
+            } catch (Exception ignored) {
+            }
+            if (!missing.isEmpty()) {
+                appendAsync("Modules: no " + gv + " build installed yet for "
+                        + String.join(", ", missing) + " — they will be fetched at launch.");
+            }
+        });
+    }
+
+    /** On open, checks the catalog for a newer launcher and offers to download it beside this one. */
+    private void checkLauncherUpdate() {
+        Thread.startVirtualThread(() -> {
+            try {
+                String self = launcherVersion();
+                if (self == null || self.isBlank() || self.contains("SNAPSHOT")) return;  // dev build
+                var versions = new meridian.launcher.modules.ModuleCatalog().load(false).launcher();
+                if (versions.isEmpty()) return;
+                meridian.launcher.modules.ModuleCatalog.EndAppVersion latest = versions.get(0);  // newest first
+                if (latest.version() != null && compareVersions(latest.version(), self) > 0) {
+                    SwingUtilities.invokeLater(() -> offerLauncherUpdate(latest, self));
+                }
+            } catch (Exception ignored) {
+                // best-effort; no network / no catalog just means no update prompt
+            }
+        });
+    }
+
+    private void offerLauncherUpdate(meridian.launcher.modules.ModuleCatalog.EndAppVersion latest, String self) {
+        int ok = javax.swing.JOptionPane.showConfirmDialog(frame,
+                "A newer launcher is available: " + latest.version() + " (you have " + self + ").\n"
+                        + "Download it next to the current launcher now? Restart afterwards to use it.",
+                "Launcher update available", javax.swing.JOptionPane.YES_NO_OPTION);
+        if (ok != javax.swing.JOptionPane.YES_OPTION) return;
+        appendAsync("Downloading launcher " + latest.version() + "…");
+        Thread.startVirtualThread(() -> {
+            try {
+                Path dest = meridian.launcher.AppPaths.launcherDir().resolve(latest.jarName());
+                new meridian.launcher.modules.ModuleCatalog()
+                        .downloadTo(latest.url(), latest.sha256(), latest.jarName(), dest, null);
+                appendAsync("Downloaded " + dest.getFileName()
+                        + " — restart with it to use launcher " + latest.version() + ".");
+            } catch (Exception e) {
+                appendAsync("Launcher update download failed: " + e.getMessage());
+            }
+        });
+    }
+
+    /** This launcher's build version, from the filtered {@code version.properties}; null in dev. */
+    private static String launcherVersion() {
+        try (java.io.InputStream in = LauncherWindow.class.getResourceAsStream("/version.properties")) {
+            if (in == null) return null;
+            java.util.Properties p = new java.util.Properties();
+            p.load(in);
+            String v = p.getProperty("version");
+            return v == null || v.contains("${") ? null : v.trim();   // unfiltered placeholder = dev
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Numeric-component version compare: {@code >0} when {@code a} is newer than {@code b}. */
+    static int compareVersions(String a, String b) {
+        String[] pa = a.replaceAll("[^0-9.]", " ").trim().split("[.\\s]+");
+        String[] pb = b.replaceAll("[^0-9.]", " ").trim().split("[.\\s]+");
+        for (int i = 0; i < Math.max(pa.length, pb.length); i++) {
+            int x = i < pa.length ? parseIntSafe(pa[i]) : 0;
+            int y = i < pb.length ? parseIntSafe(pb[i]) : 0;
+            if (x != y) return Integer.compare(x, y);
+        }
+        return 0;
+    }
+
+    private static int parseIntSafe(String s) {
+        try {
+            return Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**
@@ -333,7 +499,7 @@ public final class LauncherWindow {
 
         versionBox = new javax.swing.JComboBox<>();
         versionBox.setPrototypeDisplayValue("pre-release   ");
-        versionBox.addActionListener(e -> { updateLaunchEnabled(); refreshUpdateRow(); });
+        versionBox.addActionListener(e -> { updateLaunchEnabled(); refreshUpdateRow(); noteMissingModuleBuilds(); });
         updateButton = textButton("Update", e -> updateGame());
         updateButton.setToolTipText("Update the selected version to the newest build of its channel");
         updateToLabel = new JLabel(" ");
@@ -368,6 +534,10 @@ public final class LauncherWindow {
         proxyBox = new javax.swing.JComboBox<>();
         proxyBox.setPrototypeDisplayValue(new ProxyItem(java.nio.file.Path.of("meridian-proxy-x.y.z-all.jar")));
         proxyBox.setToolTipText("Meridian proxy jar to run (found next to the launcher)");
+        getProxyButton = new JButton("Download proxy for this version");
+        getProxyButton.setFocusPainted(false);
+        getProxyButton.setToolTipText("Fetch the Meridian proxy matching the selected game version from hyspy-dev");
+        getProxyButton.addActionListener(e -> getProxy());
 
         // --- cell 1: Game version (responsive; Update row appears only when an update exists) ---
         JPanel gameVersion = migCell("Game version", "[]6[grow,fill]6[]");
@@ -400,6 +570,7 @@ public final class LauncherWindow {
         launchControls.setBackground(BG);
         launchControls.add(boldLabel("Proxy:"));
         launchControls.add(proxyBox, "growx, wrap");
+        launchControls.add(getProxyButton, "span 2, growx, wrap");
         launchControls.add(blockTelemetryCheck, "span 2, wrap");
         launchControls.add(useProxyCheck, "span 2, wrap");
         launchControls.add(logRequestsCheck, "span 2");
@@ -914,6 +1085,10 @@ public final class LauncherWindow {
                     }
                     Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
                     if (useProxy) {
+                        // Launcher-managed module jars follow the selected game version; jars the
+                        // user placed by hand are never touched. Never throws, logs what it swaps.
+                        meridian.launcher.modules.ManagedModules.syncAll(
+                                proxyJar.getParent(), version, this::appendAsync);
                         proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
                         // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
                         // the player token, and announce a route for each server as the listing is
