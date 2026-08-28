@@ -102,9 +102,16 @@ public final class LauncherWindow {
     private static final String PREF_BLOCK_TELEMETRY = "blockTelemetry";
     private static final String PREF_USE_PROXY = "useProxy";
     private static final String PREF_LOG_REQUESTS = "logHttpsRequests";
+    // The last selection is restored on the next start — a launcher that forgets which folder,
+    // version and account you use is a launcher you have to re-configure every time.
+    private static final String PREF_HYTALE_ROOT = "hytaleRoot";
+    private static final String PREF_GAME_VERSION = "gameVersion";
+    private static final String PREF_ACCOUNT = "accountProfile";
     private JTextArea log;
 
     private volatile boolean busy;
+    /** True while a combo is being repopulated, so restored selections are not re-saved. */
+    private boolean restoring;
 
     /**
      * Combo entry wrapping one account-plus-profile row. Each in-game profile of each
@@ -230,6 +237,65 @@ public final class LauncherWindow {
         }
         proxyBox.setModel(model);
         proxyBox.setEnabled(useProxyCheck != null && useProxyCheck.isSelected());
+        selectProxyForSelectedVersion();
+    }
+
+    /**
+     * Picks the proxy built for the selected game version. A proxy speaks exactly one wire
+     * protocol, so the choice is not a preference — a jar for another version simply cannot
+     * talk to that server. Identification comes from the jar itself (its build line, or the
+     * protocol compiled into it), so switching versions switches the proxy with it. When
+     * nothing on disk fits, the current selection is left alone and the log says what is
+     * missing — "Download proxy for this version" fetches it.
+     */
+    private void selectProxyForSelectedVersion() {
+        if (proxyBox == null || proxyBox.getItemCount() == 0) return;
+        HytaleInstall install = selectedInstall();
+        if (install == null) return;
+        java.util.List<Path> jars = new java.util.ArrayList<>();
+        for (int i = 0; i < proxyBox.getItemCount(); i++) {
+            ProxyItem it = proxyBox.getItemAt(i);
+            jars.add(it == null ? null : it.jar());
+        }
+        Path current = selectedProxyJar();
+        // Reading a jar's protocol and consulting the catalog are both I/O — never on the EDT.
+        Thread.startVirtualThread(() -> {
+            String gv = HytaleRoot.gameVersion(install.root, install.version);
+            String game = gv != null ? gv : install.version;
+            Long crc = gameCrc(game);
+            int match = -1;
+            for (int i = 0; i < jars.size(); i++) {
+                if (meridian.launcher.launch.ProxyBuild.serves(jars.get(i), game, crc)) {
+                    match = i;
+                    break;
+                }
+            }
+            final int target = match;
+            boolean currentFits = current != null
+                    && meridian.launcher.launch.ProxyBuild.serves(current, game, crc);
+            SwingUtilities.invokeLater(() -> {
+                if (target >= 0 && target < proxyBox.getItemCount()) {
+                    if (proxyBox.getSelectedIndex() != target) {
+                        proxyBox.setSelectedIndex(target);
+                        append("Proxy for " + game + ": " + jars.get(target).getFileName());
+                    }
+                } else if (current != null && !currentFits) {
+                    append("No proxy for " + game + " next to the launcher — "
+                            + current.getFileName() + " is built for another version. "
+                            + "Use \"Download proxy for this version\".");
+                }
+            });
+        });
+    }
+
+    /** The wire CRC of a game version, from the cached catalog; null when it is not known yet. */
+    private Long gameCrc(String gameVersion) {
+        try {
+            var games = new meridian.launcher.modules.ModuleCatalog().load(false).games();
+            return meridian.launcher.modules.ProxyProvisioner.crcFor(games, gameVersion);
+        } catch (Exception e) {
+            return null;   // offline: the jar's own build line still identifies it
+        }
     }
 
     private java.nio.file.Path selectedProxyJar() {
@@ -482,24 +548,36 @@ public final class LauncherWindow {
                 new meridian.launcher.auth.SessionProvider.ProfileRow(
                         new meridian.launcher.auth.Account("", "account", null, null),
                         new meridian.launcher.auth.HytaleAuth.Profile("", "a-long-profile-name"))));
-        accountBox.addActionListener(e -> { updateLaunchEnabled(); refreshUpdateRow(); });
+        accountBox.addActionListener(e -> { rememberAccount(); updateLaunchEnabled(); refreshUpdateRow(); });
         addAccountButton = textButton("Add account", e -> addAccount());
         removeAccountButton = textButton("Remove", e -> removeAccount());
 
         // --- Game-version controls ---
         clientField = new JTextField(24);
         clientField.setToolTipText("The Hytale folder (holds install/ and data/); default %APPDATA%/Hytale");
-        HytaleRoot.locate(null).ifPresent(p -> clientField.setText(p.toString()));
+        // The folder you picked last time, else this OS's default install root.
+        String savedRoot = settings.getString(PREF_HYTALE_ROOT, null);
+        if (savedRoot != null && !savedRoot.isBlank()) {
+            clientField.setText(savedRoot);
+        } else {
+            HytaleRoot.locate(null).ifPresent(p -> clientField.setText(p.toString()));
+        }
         clientField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e) { reloadVersions(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e) { reloadVersions(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { reloadVersions(); }
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { onRootChanged(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { onRootChanged(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { onRootChanged(); }
         });
         JButton browse = textButton("Browse…", e -> chooseFolder());
 
         versionBox = new javax.swing.JComboBox<>();
         versionBox.setPrototypeDisplayValue("pre-release   ");
-        versionBox.addActionListener(e -> { updateLaunchEnabled(); refreshUpdateRow(); noteMissingModuleBuilds(); });
+        versionBox.addActionListener(e -> {
+            rememberVersion();
+            updateLaunchEnabled();
+            refreshUpdateRow();
+            noteMissingModuleBuilds();
+            selectProxyForSelectedVersion();
+        });
         updateButton = textButton("Update", e -> updateGame());
         updateButton.setToolTipText("Update the selected version to the newest build of its channel");
         updateToLabel = new JLabel(" ");
@@ -608,17 +686,69 @@ public final class LauncherWindow {
     /** Fills the version dropdown from the folder's install/ subfolders; active first. */
     private void reloadVersions() {
         if (versionBox == null) return;
+        // What to re-select, in order: what is selected now, then what was selected last run.
         String prev = (String) versionBox.getSelectedItem();
-        var model = new javax.swing.DefaultComboBoxModel<String>();
-        HytaleRoot.locate(clientField.getText().trim()).ifPresent(root ->
-                HytaleRoot.versions(root).forEach(model::addElement));
-        versionBox.setModel(model);
-        if (prev != null && model.getIndexOf(prev) >= 0) {
-            versionBox.setSelectedItem(prev);
-        } else if (model.getSize() > 0) {
-            versionBox.setSelectedIndex(0);   // active/default version
+        String saved = settings.getString(PREF_GAME_VERSION, null);
+        restoring = true;
+        try {
+            var model = new javax.swing.DefaultComboBoxModel<String>();
+            HytaleRoot.locate(clientField.getText().trim()).ifPresent(root ->
+                    HytaleRoot.versions(root).forEach(model::addElement));
+            versionBox.setModel(model);
+            if (prev != null && model.getIndexOf(prev) >= 0) {
+                versionBox.setSelectedItem(prev);
+            } else if (saved != null && model.getIndexOf(saved) >= 0) {
+                versionBox.setSelectedItem(saved);
+            } else if (model.getSize() > 0) {
+                versionBox.setSelectedIndex(0);   // active/default version
+            }
+        } finally {
+            restoring = false;
         }
         updateLaunchEnabled();
+        selectProxyForSelectedVersion();
+    }
+
+    /** Re-reads the versions of a newly typed/picked folder and remembers that folder. */
+    private void onRootChanged() {
+        reloadVersions();
+        if (!restoring) settings.setString(PREF_HYTALE_ROOT, clientField.getText().trim());
+    }
+
+    /** Remembers the picked account+profile, so the next start opens on the same one. */
+    private void rememberAccount() {
+        if (restoring) return;
+        ProfileItem item = (ProfileItem) accountBox.getSelectedItem();
+        if (item != null) {
+            settings.setString(PREF_ACCOUNT, item.account().id + "/" + item.profileUuid());
+        }
+    }
+
+    /** Restores the remembered account+profile row; falls back to the first (most recent). */
+    private void selectSavedAccount(javax.swing.DefaultComboBoxModel<ProfileItem> model) {
+        String saved = settings.getString(PREF_ACCOUNT, null);
+        restoring = true;
+        try {
+            if (saved != null) {
+                for (int i = 0; i < model.getSize(); i++) {
+                    ProfileItem it = model.getElementAt(i);
+                    if (saved.equals(it.account().id + "/" + it.profileUuid())) {
+                        accountBox.setSelectedIndex(i);
+                        return;
+                    }
+                }
+            }
+            accountBox.setSelectedIndex(0);
+        } finally {
+            restoring = false;
+        }
+    }
+
+    /** Remembers the picked version — but not the selection the list rebuild made for us. */
+    private void rememberVersion() {
+        if (restoring) return;
+        String v = (String) versionBox.getSelectedItem();
+        if (v != null) settings.setString(PREF_GAME_VERSION, v);
     }
 
     /**
@@ -971,12 +1101,18 @@ public final class LauncherWindow {
         for (meridian.launcher.auth.SessionProvider.ProfileRow r : provider.profileRows()) {
             model.addElement(new ProfileItem(r));
         }
-        accountBox.setModel(model);
+        restoring = true;
+        try {
+            accountBox.setModel(model);
+        } finally {
+            restoring = false;
+        }
         boolean hasAccounts = model.getSize() > 0;
         // The prompt only makes sense before any account exists.
         subtitle.setVisible(!hasAccounts);
         if (hasAccounts) {
-            accountBox.setSelectedIndex(0);   // most recently used account, first profile
+            // The profile picked last run, else the most recently used account's first profile.
+            selectSavedAccount(model);
             setStatus(BG, " ");               // idle: no noisy "Ready" line
         } else {
             setStatus(RED, "No accounts yet — click Add account");

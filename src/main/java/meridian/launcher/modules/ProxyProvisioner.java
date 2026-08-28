@@ -43,7 +43,7 @@ public final class ProxyProvisioner {
     }
 
     /** Maps a game version to its protocol CRC: exact key first, then the {@code X.Y.X} line. */
-    static Long crcFor(Map<String, Long> games, String gameVersion) {
+    public static Long crcFor(Map<String, Long> games, String gameVersion) {
         if (gameVersion == null || games == null) return null;
         Long exact = games.get(gameVersion);
         if (exact != null) return exact;
