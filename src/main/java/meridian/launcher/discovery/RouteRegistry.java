@@ -20,12 +20,24 @@ public final class RouteRegistry {
         void route(int localPort, String host, int port);
     }
 
-    /** First local port handed out; well above ephemeral/OS ranges, below 65535 with headroom. */
+    /** First local port handed out; well above ephemeral/OS ranges. */
     public static final int DEFAULT_BASE_PORT = 16000;
 
+    /**
+     * The highest port we may hand out.
+     *
+     * <p>Not a socket limit - a protocol one. A server that redirects a player sends the address
+     * to go to as {@code ClientReferral.hostTo}, whose port is a <b>signed</b> 16-bit field, and
+     * the proxy has to put its own port there to keep the player routed through it. A port above
+     * this ceiling arrives at the client as a negative number and the redirect dies with "port
+     * out of range" - the game goes nowhere at all. Real servers never come near it, so nothing
+     * else in the game ever noticed.
+     */
+    public static final int MAX_PORT = 32767;
+
     /** Ports one instance may hand out before colliding with the next slot's base. */
-    private static final int SLOT_SIZE = 1000;
-    private static final int SLOTS = 48;   // 16000 + 48*1000 = 64000, still under 65535
+    private static final int SLOT_SIZE = 512;
+    private static final int SLOTS = 32;   // 16000 + 31*512 + 511 = 32383, inside the ceiling
 
     /**
      * Each concurrent launch gets its own port slot: every Play starts its own proxy process,
@@ -37,9 +49,11 @@ public final class RouteRegistry {
 
     private final RouteSink sink;
     private final Map<String, Integer> assigned = new LinkedHashMap<>();
+    private final int basePort;
     private int nextPort;
 
     public RouteRegistry(int basePort, RouteSink sink) {
+        this.basePort = basePort;
         this.nextPort = basePort;
         this.sink = sink;
     }
@@ -59,6 +73,11 @@ public final class RouteRegistry {
         Integer existing = assigned.get(key);
         if (existing != null) {
             return existing;
+        }
+        if (nextPort > MAX_PORT) {
+            // A session with five hundred servers in it, which has never happened - but handing
+            // out a port the redirect cannot carry is worse than reusing one.
+            nextPort = basePort;
         }
         int local = nextPort++;
         assigned.put(key, local);
