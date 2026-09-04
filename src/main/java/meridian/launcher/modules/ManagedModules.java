@@ -197,6 +197,76 @@ public final class ManagedModules {
     }
 
     /** Enables/disables a managed module for one scope (a disabled module is not offered). */
+    /**
+     * Takes a jar the user hands over and manages it like any other: into the store, into the
+     * registry, into the offer.
+     *
+     * <p>It used to be copied straight into the scope folder instead, which left it outside
+     * everything the launcher knows - not in the store, not in {@code modules.json}, and copied
+     * again into every server folder it was wanted in. A module built locally is a normal thing
+     * to install, and there is no reason it should live differently from a downloaded one.
+     *
+     * @param srcJar the jar as the user chose it; it is copied, never moved or kept open
+     * @return the module as it now stands, with this build among its builds
+     */
+    public static Managed installLocal(Path scopeFolder, Path srcJar) throws IOException {
+        ModuleManifest mf = ModuleManifest.fromJar(srcJar);
+        if (mf == null) {
+            throw new IOException("Not a Meridian module - no module.json in "
+                    + srcJar.getFileName());
+        }
+        String repo = repoIdFor(mf, srcJar);
+        Path stored = storeDir().resolve(storeNameFor(repo, mf));
+        Files.createDirectories(storeDir());
+        // Into place in one step, so a proxy reading the store never sees half a jar.
+        Path tmp = storeDir().resolve(stored.getFileName() + ".part");
+        Files.copy(srcJar, tmp, StandardCopyOption.REPLACE_EXISTING);
+        Files.move(tmp, stored, StandardCopyOption.REPLACE_EXISTING);
+
+        // No game line: a jar off somebody's disk does not say which line it was cut for, and
+        // the stamp it does carry is what the proxy actually checks.
+        Build build = new Build(stored.getFileName().toString(), mf.version(), null,
+                mf.builtFor(), mf.requiresProtocol());
+        Registry reg = Registry.load();
+        adoptOffer(reg, scopeFolder);
+        Entry e = reg.entry(scopeFolder, repo);
+        e.name = mf.name() != null ? mf.name() : repo;
+        e.builds.removeIf(b -> sameLine(b, build));
+        e.builds.add(build);
+        reg.save();
+        writeOffer(scopeFolder, reg);
+        return reg.forScope(scopeFolder).stream().filter(m -> m.repo().equals(repo)).findFirst()
+                .orElse(new Managed(repo, e.name, e.enabled, List.copyOf(e.builds)));
+    }
+
+    /**
+     * What to file a hand-installed module under.
+     *
+     * <p>The module's own name, as a repo id would spell it - so a locally built jar lands on top
+     * of the catalog build of the same module rather than beside it, which is what somebody
+     * testing their own build wants. Falls back to the file name when the jar has no name.
+     */
+    private static String repoIdFor(ModuleManifest mf, Path srcJar) {
+        String from = mf.name() != null && !mf.name().isBlank()
+                ? mf.name()
+                : srcJar.getFileName().toString().replaceAll("(?i)\\.jar$", "");
+        String id = from.trim().toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("(^-|-$)", "");
+        return id.isEmpty() ? "local-module" : id;
+    }
+
+    /** A store name that says what the jar is, so two builds of one module cannot collide. */
+    private static String storeNameFor(String repo, ModuleManifest mf) {
+        StringBuilder name = new StringBuilder(repo);
+        if (mf.version() != null && !mf.version().isBlank()) {
+            name.append('-').append(mf.version().replaceAll("[^A-Za-z0-9.+_-]", "_"));
+        }
+        if (mf.builtFor() != null) {
+            name.append("+p").append(mf.builtFor());
+        }
+        return name.append(".jar").toString();
+    }
+
     public static void setEnabled(Path scopeFolder, String repo, boolean enabled) {
         Registry reg = Registry.load();
         adoptOffer(reg, scopeFolder);
@@ -263,8 +333,13 @@ public final class ManagedModules {
             }
             if (changed) {
                 reg.save();
-                writeOffer(scope, reg);
             }
+            // The offer is rewritten every time, changed or not. It is built by reading the jars
+            // in the store, so this is what notices a jar swapped there by hand - and without it
+            // the catalog would keep describing the file that used to be at that name until
+            // something else happened to touch the module, which is how an offer came to claim a
+            // version the jar no longer had. A few small reads at startup.
+            writeOffer(scope, reg);
         }
     }
 
@@ -334,14 +409,30 @@ public final class ManagedModules {
         for (Managed m : reg.forScope(scopeFolder)) {
             if (!m.enabled()) continue;
             for (Build b : m.builds()) {
+                Path jar = storeDir().resolve(b.jar());
+                // What the jar says about itself, read now - not what was true when it was
+                // installed. A jar replaced in the store by hand is the ordinary case while a
+                // module is being worked on, and an offer describing the file it used to be is
+                // one the proxy refuses outright: it holds the offer and the jar to agreeing
+                // exactly, on purpose, because a catalog that misdescribes a jar is worse than
+                // no catalog at all.
+                ModuleManifest mf;
+                try {
+                    mf = ModuleManifest.fromJar(jar);
+                } catch (IOException e) {
+                    mf = null;
+                }
+                if (mf == null) {
+                    continue;               // gone, or not a module: offering it helps nobody
+                }
                 JsonObject o = new JsonObject();
-                o.addProperty("path", storeDir().resolve(b.jar()).toAbsolutePath().toString());
+                o.addProperty("path", jar.toAbsolutePath().toString());
                 o.addProperty("repo", m.repo());     // lets the launcher adopt a folder it didn't write
-                o.addProperty("module", m.name());
-                if (b.version() != null) o.addProperty("version", b.version());
+                o.addProperty("module", mf.name() != null ? mf.name() : m.name());
+                if (mf.version() != null) o.addProperty("version", mf.version());
                 if (b.game() != null) o.addProperty("game", b.game());
-                if (b.builtFor() != null) o.addProperty("builtFor", b.builtFor());
-                o.addProperty("requiresProtocol", b.requiresProtocol());
+                if (mf.builtFor() != null) o.addProperty("builtFor", mf.builtFor());
+                o.addProperty("requiresProtocol", mf.requiresProtocol());
                 arr.add(o);
             }
         }

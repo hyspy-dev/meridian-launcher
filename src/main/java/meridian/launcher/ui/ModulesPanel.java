@@ -428,12 +428,21 @@ public final class ModulesPanel extends JPanel {
 
     private void addFromFile() {
         JFileChooser fc = new JFileChooser();
+        // Where the launcher lives, which is where its jars are - rather than wherever Swing
+        // decides, which is the user documents folder and never has a module in it.
+        java.nio.file.Path from = meridian.launcher.AppPaths.launcherDir();
+        if (java.nio.file.Files.isDirectory(from)) {
+            fc.setCurrentDirectory(from.toFile());
+        }
         fc.setFileFilter(new FileNameExtensionFilter("Module jar (*.jar)", "jar"));
         if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         Path jar = fc.getSelectedFile().toPath();
         try {
-            InstalledModule m = currentStore().install(jar);
-            setStatus(GREEN, "Installed " + m.displayName());
+            // Into the store and the offer, the same way a downloaded module goes. Copying it
+            // into this one server folder instead left it unmanaged and unlisted, and needed
+            // doing again for every other server it was wanted in.
+            var m = meridian.launcher.modules.ManagedModules.installLocal(currentScopeFolder(), jar);
+            setStatus(GREEN, "Installed " + m.name() + " into the store");
             reloadInstalled();
         } catch (Exception ex) {
             setStatus(RED, ex.getMessage());
