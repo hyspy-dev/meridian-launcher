@@ -614,10 +614,7 @@ public final class ModulesPanel extends JPanel {
         for (Map.Entry<String, List<CatalogVersion>> e : byVersion.entrySet()) {
             List<CatalogVersion> group = e.getValue();
             CatalogVersion match = group.size() == 1 ? group.get(0)
-                    : gv == null ? null
-                    : group.stream()
-                            .filter(v -> meridian.launcher.modules.ManagedModules.matchesGame(v.games(), gv))
-                            .findFirst().orElse(null);
+                    : ManagedModules.buildFor(group, gv);
             if (match != null) {
                 String label = match.version() + (match.prerelease() ? " (pre)" : "");
                 JButton b = button(label, () -> install(module.repo(), match));

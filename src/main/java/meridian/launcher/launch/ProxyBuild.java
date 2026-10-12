@@ -77,11 +77,20 @@ public final class ProxyBuild {
      * Whether {@code jar} serves {@code gameVersion}: by its name's line when it has one, else
      * by its CRC against {@code gameCrc} (the version's wire CRC, from the catalog). Null
      * inputs mean "unknown", and an unknown build is never claimed to match.
+     *
+     * <p>A line named for exactly this game always serves it. A wildcard {@code X.Y.X} line only
+     * does when it also speaks the game's protocol: one game of that minor can be frozen on a
+     * line of its own (0.7.0-pre.5.1 stayed on build 251 when 0.7.X moved to the release), and
+     * the wildcard build next to it would otherwise be taken for it.
      */
     public static boolean serves(Path jar, String gameVersion, Long gameCrc) {
         String line = lineOf(jar);
         if (line != null && gameVersion != null) {
-            return coversGame(line, gameVersion);
+            if (line.equals(gameVersion)) return true;
+            if (!coversGame(line, gameVersion)) return false;
+            if (gameCrc == null) return true;   // offline: the line is all there is to go on
+            Long crc = crcOf(jar);
+            return crc == null || crc.equals(gameCrc);
         }
         Long crc = crcOf(jar);
         return crc != null && crc.equals(gameCrc);

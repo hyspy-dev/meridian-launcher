@@ -106,6 +106,8 @@ public final class LauncherWindow {
     // version and account you use is a launcher you have to re-configure every time.
     private static final String PREF_HYTALE_ROOT = "hytaleRoot";
     private static final String PREF_GAME_VERSION = "gameVersion";
+    /** The community server - the same invite the proxy links to. */
+    private static final String DISCORD_URL = "https://discord.gg/kApV2z2Qmw";
     private static final String PREF_ACCOUNT = "accountProfile";
     private JTextArea log;
 
@@ -204,6 +206,12 @@ public final class LauncherWindow {
         tabs.addTab("Modules", modulesPanel);
         tabs.addTab("Servers", serversPanel);
         tabs.addTab("Tools", new ToolsPanel(provider, this::openBrowser));
+        tabs.addTab("Console", buildConsoleTab());
+        // The community link sits at the right end of the tab strip, on every tab.
+        JPanel trailing = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
+        trailing.setOpaque(false);
+        trailing.add(textButton("Discord", e -> openBrowser(DISCORD_URL)));
+        tabs.putClientProperty("JTabbedPane.trailingComponent", trailing);
         tabs.addChangeListener(e -> {
             if (tabs.getSelectedComponent() == serversPanel) {
                 serversPanel.ensureLoaded();
@@ -499,6 +507,40 @@ public final class LauncherWindow {
         footer.add(subtitle);
         bottom.add(footer, BorderLayout.SOUTH);
         return bottom;
+    }
+
+    /**
+     * The Console tab: the same log as the Launch tab's console - one document, two views - at a
+     * size you can read it at, with Copy and Clear. It follows new lines as they come.
+     */
+    private JPanel buildConsoleTab() {
+        JTextArea full = new JTextArea(log.getDocument());
+        full.setEditable(false);
+        full.setLineWrap(true);
+        full.setWrapStyleWord(true);
+        full.setFont(log.getFont());
+        full.setBackground(log.getBackground());
+        full.setForeground(log.getForeground());
+        full.setMargin(new Insets(8, 8, 8, 8));
+        ((javax.swing.text.DefaultCaret) full.getCaret())
+                .setUpdatePolicy(javax.swing.text.DefaultCaret.ALWAYS_UPDATE);
+        JScrollPane scroll = new JScrollPane(full);
+        scroll.setBorder(BorderFactory.createLineBorder(new Color(45, 45, 45)));
+
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        bar.setOpaque(false);
+        bar.add(textButton("Copy", e -> {
+            java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(
+                    new java.awt.datatransfer.StringSelection(log.getText()), null);
+        }));
+        bar.add(textButton("Clear", e -> log.setText("")));
+
+        JPanel tab = new JPanel(new BorderLayout(0, 6));
+        tab.setBackground(BG);
+        tab.setBorder(BorderFactory.createEmptyBorder(10, 16, 12, 16));
+        tab.add(bar, BorderLayout.NORTH);
+        tab.add(scroll, BorderLayout.CENTER);
+        return tab;
     }
 
     private JScrollPane buildLogArea() {
@@ -1207,6 +1249,7 @@ public final class LauncherWindow {
                         appendAsync("CA trust: " + caTrust.describe() + ".");
                     }
                     Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
+                    meridian.launcher.discovery.MatchmakingRewriter matchmaking = null;
                     if (useProxy) {
                         // Launcher-managed module jars follow the selected game version and the
                         // protocol of the proxy being started; jars the user placed by hand are
@@ -1217,14 +1260,22 @@ public final class LauncherWindow {
                         proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
                         // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
                         // the player token, and announce a route for each server as the listing is
-                        // rewritten.
+                        // rewritten - and for each minigame server matchmaking assigns.
                         proxyControl = new meridian.launcher.launch.ProxyControl(proxyProcess.getOutputStream());
                         proxyControl.token(s.sessionToken);
                         RouteRegistry routes = RouteRegistry.create(proxyControl::route);
                         handlers.put("server-discovery.hytale.com", new ServerDiscoveryRewriter(store, routes));
+                        matchmaking = new meridian.launcher.discovery.MatchmakingRewriter(routes, this::appendAsync);
+                        handlers.put("matchmaking.hytale.com", matchmaking);
                     }
                     java.util.Set<String> block = blockTelemetry ? HytaleBackends.TELEMETRY : java.util.Set.of();
                     MitmProxy mitm = new MitmProxy(0, captureCa, java.util.Set.of(), handlers, block);
+                    if (matchmaking != null) {
+                        // The match is pushed down the socket gateway the moment it is assigned,
+                        // and the game connects on that push without polling again - so the
+                        // gateway's messages are read too, not just the polled ticket.
+                        mitm.setWebSocketHandler("socket-gateway.hytale.com", matchmaking);
+                    }
                     mitm.setLogRequests(logHttps, this::logHttpRequest);
                     mitm.start();
                     proxy = mitm;

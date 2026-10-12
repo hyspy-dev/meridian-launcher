@@ -14,10 +14,14 @@ import java.util.Map;
  */
 public final class RouteRegistry {
 
-    /** Receives each new {@code localPort → host:port} mapping (wired to the proxy control channel). */
+    /**
+     * Receives each new {@code localPort → host:port} mapping (wired to the proxy control channel).
+     * {@code scope} names the module folder the proxy should use for it, or is null for the
+     * server's own {@code <host>_<port>} folder.
+     */
     @FunctionalInterface
     public interface RouteSink {
-        void route(int localPort, String host, int port);
+        void route(int localPort, String host, int port, String scope);
     }
 
     /** First local port handed out; well above ephemeral/OS ranges. */
@@ -69,6 +73,16 @@ public final class RouteRegistry {
      * first time this server is seen. Idempotent per server within the session.
      */
     public synchronized int localPortFor(String host, int port) {
+        return localPortFor(host, port, null);
+    }
+
+    /**
+     * As {@link #localPortFor(String, int)}, with the module folder the proxy should load for
+     * this server named by {@code scope} instead of by its address - for servers that are a new
+     * address every time, like a matchmade game, where a folder per address would be a folder per
+     * match. The scope goes with the first announcement; a server already routed keeps its own.
+     */
+    public synchronized int localPortFor(String host, int port, String scope) {
         String key = host + ":" + port;
         Integer existing = assigned.get(key);
         if (existing != null) {
@@ -81,7 +95,7 @@ public final class RouteRegistry {
         }
         int local = nextPort++;
         assigned.put(key, local);
-        sink.route(local, host, port);
+        sink.route(local, host, port, scope);
         return local;
     }
 }

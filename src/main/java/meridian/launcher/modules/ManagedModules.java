@@ -409,6 +409,9 @@ public final class ManagedModules {
         ModuleCatalog catalog = new ModuleCatalog();
         Catalog[] lazy = new Catalog[1];
         Registry reg = Registry.load();
+        // Set when the proxy itself speaks another protocol than this game: then no module is to
+        // blame, and none is touched - one line about the proxy says it all.
+        Long gameCrc = null;
         for (Path scope : scopeFolders(proxyDir)) {
             boolean changed = false;
             // A server folder the proxy seeded is unknown to the registry until now.
@@ -421,6 +424,13 @@ public final class ManagedModules {
                 if (refused == null && m.covers(gameVersion)) continue;
                 try {
                     Catalog c = lazy[0] != null ? lazy[0] : (lazy[0] = catalog.load(false));
+                    if (refused != null) {
+                        Long speaks = ProxyProvisioner.crcFor(c.games(), gameVersion);
+                        if (speaks != null && !speaks.equals(proxyCrc)) {
+                            gameCrc = speaks;   // the proxy is the one out of line, not the module
+                            continue;
+                        }
+                    }
                     CatalogVersion target = resolve(c, m.repo(), gameVersion);
                     if (target == null) {
                         log.accept("Modules: " + m.name() + " has no build for " + gameVersion + " — skipped.");
@@ -463,6 +473,11 @@ public final class ManagedModules {
             // version the jar no longer had. A few small reads at startup.
             writeOffer(scope, reg);
         }
+        if (gameCrc != null) {
+            log.accept("Modules: the selected proxy speaks protocol " + proxyCrc + ", but "
+                    + gameVersion + " speaks " + gameCrc + " — its modules won't load in it."
+                    + " Pick the proxy built for " + gameVersion + "; modules were left as they are.");
+        }
     }
 
     /** The shared {@code modules} folder plus every {@code <host_port>/modules} under it. */
@@ -480,17 +495,43 @@ public final class ManagedModules {
         return out;
     }
 
-    /** Newest catalog version of {@code repo} built for {@code gameVersion} (stable preferred). */
+    /**
+     * Newest catalog version of {@code repo} built for {@code gameVersion} (stable preferred). A
+     * build for exactly this game wins over the {@code X.Y.X} build of the same minor: a game can
+     * be frozen on a line of its own, on another protocol than the wildcard line.
+     */
     private static CatalogVersion resolve(Catalog c, String repo, String gameVersion) {
         for (CatalogModule mod : c.modules()) {
             if (!mod.repo().equals(repo)) continue;
-            CatalogVersion pre = null;
-            for (CatalogVersion v : mod.versions()) {   // newest first
-                if (v.games() == null || !matchesGame(v.games(), gameVersion)) continue;
-                if (!v.prerelease()) return v;
-                if (pre == null) pre = v;
-            }
-            return pre;
+            CatalogVersion exact = newest(mod, v -> v.games() != null && v.games().contains(gameVersion));
+            return exact != null ? exact
+                    : newest(mod, v -> v.games() != null && matchesGame(v.games(), gameVersion));
+        }
+        return null;
+    }
+
+    /** The newest version passing {@code fits}, stable preferred over a pre-release. */
+    private static CatalogVersion newest(CatalogModule mod, java.util.function.Predicate<CatalogVersion> fits) {
+        CatalogVersion pre = null;
+        for (CatalogVersion v : mod.versions()) {   // newest first
+            if (!fits.test(v)) continue;
+            if (!v.prerelease()) return v;
+            if (pre == null) pre = v;
+        }
+        return pre;
+    }
+
+    /**
+     * Of the builds one release ships, the one for {@code gameVersion}: the build named for
+     * exactly that game, else the one whose {@code X.Y.X} line covers it, else null.
+     */
+    public static CatalogVersion buildFor(List<CatalogVersion> builds, String gameVersion) {
+        if (gameVersion == null) return null;
+        for (CatalogVersion v : builds) {
+            if (v.games() != null && v.games().contains(gameVersion)) return v;
+        }
+        for (CatalogVersion v : builds) {
+            if (matchesGame(v.games(), gameVersion)) return v;
         }
         return null;
     }

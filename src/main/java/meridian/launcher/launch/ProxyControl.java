@@ -13,8 +13,11 @@ import java.nio.charset.StandardCharsets;
  *
  * <ul>
  *   <li>{@link #token(String)} → {@code TOKEN <jwt>} — set/replace the player session token.</li>
- *   <li>{@link #route(int, String, int)} → {@code ROUTE <localPort> <host> <port>} — bind a port
- *       that relays to that server.</li>
+ *   <li>{@link #route(int, String, int, String)} → {@code ROUTE <localPort> <host> <port>} — bind
+ *       a port that relays to that server; with a scope, preceded by
+ *       {@code SCOPE <localPort> <name>}, which tells the proxy to load that port's modules from
+ *       {@code <name>/modules} instead of the server's own folder. A proxy that predates SCOPE
+ *       ignores the line and falls back to the server's folder.</li>
  * </ul>
  */
 public final class ProxyControl implements AutoCloseable {
@@ -31,7 +34,10 @@ public final class ProxyControl implements AutoCloseable {
         }
     }
 
-    public synchronized void route(int localPort, String host, int port) {
+    public synchronized void route(int localPort, String host, int port, String scope) {
+        if (scope != null && !scope.isBlank()) {
+            send("SCOPE " + localPort + " " + scope);   // first, so the route is born with it
+        }
         send("ROUTE " + localPort + " " + host + " " + port);
     }
 

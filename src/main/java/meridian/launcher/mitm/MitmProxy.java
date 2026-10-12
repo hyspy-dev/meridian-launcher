@@ -50,6 +50,8 @@ public final class MitmProxy implements AutoCloseable {
     private final Set<String> interceptHosts;
     private final Set<String> blockHosts;
     private final Map<String, ExchangeHandler> httpHandlers;
+    /** Hosts whose WebSockets are carried through the MITM, with what reads their messages. */
+    private final Map<String, WebSocketHandler> wsHandlers = new ConcurrentHashMap<>();
     private final Map<String, Verdict> verdicts = new ConcurrentHashMap<>();
     private final SSLContext upstreamContext;
     private final java.net.http.HttpClient httpClient;
@@ -120,6 +122,19 @@ public final class MitmProxy implements AutoCloseable {
         this.requestLogger = sink;
     }
 
+    /**
+     * Intercepts {@code host} and carries its WebSockets through the MITM, every text message
+     * the server sends passing through {@code handler} on its way to the client. Plain HTTP
+     * requests to the host go through its exchange handler if it has one, else unchanged. Call
+     * before {@link #start()}.
+     *
+     * <p>Every intercepted host gets this much anyway - a WebSocket in log-all mode is relayed
+     * and logged rather than broken - this is for the hosts whose messages are to be read.
+     */
+    public void setWebSocketHandler(String host, WebSocketHandler handler) {
+        wsHandlers.put(host.toLowerCase(Locale.ROOT), handler);
+    }
+
     public void start() {
         Thread.startVirtualThread(() -> {
             while (running) {
@@ -169,8 +184,8 @@ public final class MitmProxy implements AutoCloseable {
                     "HTTP/1.1 200 Connection Established\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
             client.getOutputStream().flush();
 
-            if (httpHandlers.containsKey(key)) {
-                interceptHttp(client, host, port, httpHandlers.get(key));
+            if (httpHandlers.containsKey(key) || wsHandlers.containsKey(key)) {
+                interceptHttp(client, host, port, httpHandlers.getOrDefault(key, PASS_THROUGH));
             } else if (interceptHosts.contains(key)) {
                 intercept(client, host, port);
             } else if (logRequests) {
@@ -234,7 +249,7 @@ public final class MitmProxy implements AutoCloseable {
      * extra sink (the UI console + file). Bodies are shown as text for textual content types and
      * truncated past {@link #BODY_LOG_CAP}; binary bodies are summarised by size.
      */
-    private void logExchange(HttpExchange ex) {
+    private void logExchange(HttpExchange ex, byte[] sent) {
         StringBuilder sb = new StringBuilder(512);
         sb.append(ex.method()).append(" https://").append(ex.host()).append(ex.path());
         byte[] reqBody = ex.requestBody();
@@ -246,7 +261,14 @@ public final class MitmProxy implements AutoCloseable {
         if (respBody != null && respBody.length > 0) {
             sb.append(": ").append(bodyToText(respBody, ex.responseHeaders()));
         }
-        String entry = sb.toString();
+        if (sent != null && respBody != null && !java.util.Arrays.equals(sent, respBody)) {
+            sb.append("\n    rewritten to: ").append(bodyToText(sent, ex.responseHeaders()));
+        }
+        emitLogEntry(sb.toString());
+    }
+
+    /** One entry of the request log: to the log, and to the extra sink (UI console) when set. */
+    private void emitLogEntry(String entry) {
         log.info("HTTPS {}", entry);
         java.util.function.Consumer<String> sink = requestLogger;
         if (sink != null) {
@@ -363,11 +385,20 @@ public final class MitmProxy implements AutoCloseable {
                 String path = rl[1];
 
                 Map<String, String> reqHeaders = readHeaders(in);
+                if (WebSocketRelay.isUpgrade(reqHeaders)) {
+                    // A WebSocket cannot go through a one-shot exchange (that answered 400 and
+                    // cost the game its push channel): it is carried frame by frame instead.
+                    WebSocketRelay.run(clientTls, in, out, host, port, method, path, reqHeaders,
+                            upstreamContext,
+                            wsHandlers.getOrDefault(host.toLowerCase(Locale.ROOT), WebSocketHandler.PASS),
+                            logRequests ? this::emitLogEntry : null);
+                    return;
+                }
                 byte[] reqBody = readBody(in, reqHeaders);
 
                 HttpExchange exchange = forward(host, port, method, path, reqHeaders, reqBody);
                 byte[] responseBody = handler.handle(exchange);
-                if (logRequests) logExchange(exchange);
+                if (logRequests) logExchange(exchange, responseBody);
                 writeResponse(out, exchange.status(), exchange.responseContentType(), responseBody);
             }
         } catch (Exception e) {
