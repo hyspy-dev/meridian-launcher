@@ -12,13 +12,16 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import meridian.launcher.AppPaths;
+import meridian.launcher.Versions;
 import meridian.launcher.modules.ModuleCatalog.Catalog;
 import meridian.launcher.modules.ModuleCatalog.CatalogModule;
 import meridian.launcher.modules.ModuleCatalog.CatalogVersion;
@@ -34,8 +37,9 @@ import meridian.launcher.modules.ModuleCatalog.CatalogVersion;
  * a hand-placed jar always wins over an offered one.
  *
  * <p>Because jars are never swapped in place, several proxy instances — even for different game
- * versions — can run from the same folders at once. Each build is pinned; the launcher only
- * <b>adds</b> a build when the game version being started has none yet.
+ * versions — can run from the same folders at once. Each build is pinned; at launch the launcher
+ * only <b>adds</b> a build when the game version being started has none yet, or replaces one the
+ * proxy would refuse. Moving a working build to a newer version is the user's call (Update).
  */
 public final class ManagedModules {
 
@@ -172,7 +176,8 @@ public final class ManagedModules {
     /**
      * Downloads {@code v} into the store (verifying its sha256) and registers it for
      * {@code scopeFolder}, then rewrites that folder's {@code modules.json}. The module's other
-     * builds stay — a build is only replaced by another build of the same game line.
+     * builds stay — a build is only replaced by another build of the same game line, or by a
+     * protocol-neutral one, which serves every line.
      */
     public static Managed install(Path scopeFolder, String repo, CatalogVersion v,
                                   ModuleCatalog catalog)
@@ -188,12 +193,111 @@ public final class ManagedModules {
         adoptOffer(reg, scopeFolder);
         Entry e = reg.entry(scopeFolder, repo);
         e.name = mf.name() != null ? mf.name() : repo;
-        e.builds.removeIf(b -> sameLine(b, build));
+        e.builds.removeIf(b -> supersedes(build, b));
         e.builds.add(build);
         reg.save();
         writeOffer(scopeFolder, reg);
         return reg.forScope(scopeFolder).stream().filter(m -> m.repo().equals(repo)).findFirst()
                 .orElse(new Managed(repo, e.name, e.enabled, List.copyOf(e.builds)));
+    }
+
+    // --- updates (Modules tab) -----------------------------------------------------
+
+    /**
+     * What an Update would bring a module to.
+     *
+     * @param version      what to show: the version the selected game would run, else the newest
+     * @param incompatible some installed build was cut for a protocol its line no longer speaks,
+     *                     so the proxy refuses it as it stands
+     * @param targets      the catalog builds to install, at most one per game line
+     */
+    public record Update(String version, boolean incompatible, List<CatalogVersion> targets) {}
+
+    /**
+     * The newest published build for every line {@code m} has a catalog build of, where that is
+     * newer than what is installed - or where what is installed was cut for another protocol than
+     * its line now speaks. Null when there is nothing to update.
+     *
+     * <p>Only builds that came from the catalog are looked at: a jar added from a file is the
+     * user's own, and nothing published is its next version.
+     */
+    public static Update updateFor(Managed m, Catalog c, String gameVersion) {
+        CatalogModule mod = c == null ? null : moduleOf(c, m.repo());
+        if (mod == null) return null;
+        Set<String> published = new HashSet<>();
+        for (CatalogVersion v : mod.versions()) published.add(v.jarName());
+        Map<String, CatalogVersion> targets = new LinkedHashMap<>();
+        boolean incompatible = false;
+        for (Build b : m.builds()) {
+            if (!published.contains(b.jar())) continue;            // the user's own jar
+            CatalogVersion newest = newestFor(mod, b.game());
+            if (newest == null || newest.jarName().equals(b.jar())) continue;
+            boolean stale = speaksOldProtocol(b, c.games());
+            if (stale || Versions.compare(newest.version(), b.version()) > 0) {
+                targets.putIfAbsent(newest.jarName(), newest);
+                incompatible |= stale;
+            }
+        }
+        if (targets.isEmpty()) return null;
+        String shown = null;
+        for (CatalogVersion t : targets.values()) {
+            if (gameVersion != null && (isNeutral(t) || matchesGame(t.games(), gameVersion))) {
+                shown = t.version();
+                break;
+            }
+        }
+        if (shown == null) {
+            for (CatalogVersion t : targets.values()) {
+                if (shown == null || Versions.compare(t.version(), shown) > 0) shown = t.version();
+            }
+        }
+        return new Update(shown, incompatible, List.copyOf(targets.values()));
+    }
+
+    /** Installs every build {@code u} names into the store and this scope. */
+    public static Managed update(Path scopeFolder, String repo, Update u, ModuleCatalog catalog)
+            throws IOException, InterruptedException {
+        Managed now = null;
+        for (CatalogVersion v : u.targets()) {
+            now = install(scopeFolder, repo, v, catalog);   // each replaces what its line had
+        }
+        return now;
+    }
+
+    private static CatalogModule moduleOf(Catalog c, String repo) {
+        for (CatalogModule mod : c.modules()) {
+            if (mod.repo().equals(repo)) return mod;
+        }
+        return null;
+    }
+
+    /**
+     * The newest published build that can stand in for a build of {@code line}: one cut for that
+     * line, or a protocol-neutral one - a module that stopped needing the protocol serves every
+     * line. A neutral build ({@code line} null) is only followed by another neutral one. Stable
+     * preferred, as at launch.
+     */
+    private static CatalogVersion newestFor(CatalogModule mod, String line) {
+        CatalogVersion pre = null;
+        for (CatalogVersion v : mod.versions()) {   // newest first
+            if (!isNeutral(v) && (line == null || !matchesGame(v.games(), line))) continue;
+            if (!v.prerelease()) return v;
+            if (pre == null) pre = v;
+        }
+        return pre;
+    }
+
+    private static boolean isNeutral(CatalogVersion v) {
+        return v.games() == null || v.games().isEmpty();
+    }
+
+    /** A game-bound build whose stamp is not the CRC its line speaks now - the proxy refuses it. */
+    private static boolean speaksOldProtocol(Build b, Map<String, Long> games) {
+        if (!b.requiresProtocol() || b.builtFor() == null || b.game() == null || games == null) {
+            return false;
+        }
+        Long now = games.get(b.game());
+        return now != null && !now.equals(b.builtFor());
     }
 
     /** Enables/disables a managed module for one scope (a disabled module is not offered). */
@@ -291,12 +395,16 @@ public final class ManagedModules {
 
     /**
      * Makes sure every enabled managed module in every scope under {@code proxyDir} has a build
-     * for {@code gameVersion}, fetching missing ones into the store and refreshing each
-     * {@code modules.json}. Adds only — never replaces or deletes — so concurrent proxy
-     * instances are unaffected. Never throws; the catalog is fetched only if something is
-     * actually missing.
+     * for {@code gameVersion} that the proxy will load, fetching it into the store and refreshing
+     * each {@code modules.json}. A missing build is added; a build stamped for another protocol
+     * than {@code proxyCrc} is replaced, since the proxy would refuse it anyway (a new protocol on
+     * the same game line). A build that loads is never touched, so concurrent proxy instances are
+     * unaffected. Never throws; the catalog is fetched only if something actually needs it.
+     *
+     * @param proxyCrc the protocol of the proxy about to start, or null when unknown
      */
-    public static void syncAll(Path proxyDir, String gameVersion, Consumer<String> log) {
+    public static void syncAll(Path proxyDir, String gameVersion, Long proxyCrc,
+                               Consumer<String> log) {
         if (proxyDir == null || gameVersion == null) return;
         ModuleCatalog catalog = new ModuleCatalog();
         Catalog[] lazy = new Catalog[1];
@@ -308,7 +416,9 @@ public final class ManagedModules {
             adoptOffer(reg, scope);
             if (reg.forScope(scope).size() != before) changed = true;
             for (Managed m : reg.forScope(scope)) {
-                if (!m.enabled() || m.covers(gameVersion)) continue;
+                if (!m.enabled()) continue;
+                Build refused = refusedBy(m, gameVersion, proxyCrc);
+                if (refused == null && m.covers(gameVersion)) continue;
                 try {
                     Catalog c = lazy[0] != null ? lazy[0] : (lazy[0] = catalog.load(false));
                     CatalogVersion target = resolve(c, m.repo(), gameVersion);
@@ -316,16 +426,28 @@ public final class ManagedModules {
                         log.accept("Modules: " + m.name() + " has no build for " + gameVersion + " — skipped.");
                         continue;
                     }
+                    if (refused != null && (target.jarName().equals(refused.jar())
+                            || target.builtFor() != null && !target.builtFor().equals(proxyCrc))) {
+                        log.accept("Modules: " + m.name() + " " + refused.version()
+                                + " is built for another protocol, and no build for this one is"
+                                + " published yet — the proxy will skip it.");
+                        continue;
+                    }
                     Path jar = ensureInStore(catalog, target);
                     ModuleManifest mf = ModuleManifest.fromJar(jar);
-                    Entry e = reg.entry(scope, m.repo());
-                    e.builds.add(new Build(target.jarName(),
+                    Build build = new Build(target.jarName(),
                             mf != null && mf.version() != null ? mf.version() : target.version(),
                             target.games() == null || target.games().isEmpty() ? null : target.games().get(0),
                             mf != null ? mf.builtFor() : target.builtFor(),
-                            mf != null ? mf.requiresProtocol() : target.requiresProtocol()));
+                            mf != null ? mf.requiresProtocol() : target.requiresProtocol());
+                    Entry e = reg.entry(scope, m.repo());
+                    e.builds.removeIf(b -> supersedes(build, b));
+                    e.builds.add(build);
                     changed = true;
-                    log.accept("Modules: fetched " + target.jarName() + " for " + gameVersion + ".");
+                    log.accept(refused != null
+                            ? "Modules: replaced " + refused.jar() + " (built for another protocol) with "
+                                    + target.jarName() + "."
+                            : "Modules: fetched " + target.jarName() + " for " + gameVersion + ".");
                 } catch (Exception ex) {
                     log.accept("Modules: couldn't fetch " + m.name() + " for " + gameVersion
                             + ": " + ex.getMessage());
@@ -383,6 +505,35 @@ public final class ManagedModules {
 
     private static boolean sameLine(Build a, Build b) {
         return a.game() == null ? b.game() == null : a.game().equals(b.game());
+    }
+
+    /**
+     * Whether installing catalog build {@code newer} retires {@code old}: the same line, or any
+     * line when {@code newer} is protocol-neutral - left beside it, a line build would offer the
+     * proxy the same module twice.
+     */
+    private static boolean supersedes(Build newer, Build old) {
+        return newer.game() == null || sameLine(newer, old);
+    }
+
+    /**
+     * The build the proxy would pick for {@code gameVersion} and then refuse: none of the
+     * module's builds for that game is stamped for the protocol the proxy speaks. Null when one
+     * is, when the module has none for that game, or when the proxy's protocol is not known. A
+     * protocol-neutral build is never the problem - and one added from a file is the user's own.
+     */
+    private static Build refusedBy(Managed m, String gameVersion, Long proxyCrc) {
+        if (proxyCrc == null) return null;
+        Build refused = null;
+        for (Build b : m.builds()) {
+            if (b.game() == null) return null;
+            if (!matchesGame(List.of(b.game()), gameVersion)) continue;
+            if (!b.requiresProtocol() || b.builtFor() == null || b.builtFor().equals(proxyCrc)) {
+                return null;
+            }
+            refused = b;
+        }
+        return refused;
     }
 
     /** The jar in the immutable store, downloading (and sha256-verifying) it if absent. */

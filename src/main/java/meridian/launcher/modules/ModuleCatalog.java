@@ -87,6 +87,11 @@ public final class ModuleCatalog {
         return c;
     }
 
+    /** The catalog this instance already fetched, or null - never touches the network. */
+    public Catalog cached() {
+        return cache;
+    }
+
     /** Convenience: just the modules (used by the Modules tab). */
     public List<CatalogModule> list(boolean forceRefresh) throws IOException, InterruptedException {
         return load(forceRefresh).modules();

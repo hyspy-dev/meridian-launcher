@@ -392,7 +392,7 @@ public final class LauncherWindow {
                 var versions = new meridian.launcher.modules.ModuleCatalog().load(false).launcher();
                 if (versions.isEmpty()) return;
                 meridian.launcher.modules.ModuleCatalog.EndAppVersion latest = versions.get(0);  // newest first
-                if (latest.version() != null && compareVersions(latest.version(), self) > 0) {
+                if (latest.version() != null && meridian.launcher.Versions.compare(latest.version(), self) > 0) {
                     SwingUtilities.invokeLater(() -> offerLauncherUpdate(latest, self));
                 }
             } catch (Exception ignored) {
@@ -431,26 +431,6 @@ public final class LauncherWindow {
             return v == null || v.contains("${") ? null : v.trim();   // unfiltered placeholder = dev
         } catch (Exception e) {
             return null;
-        }
-    }
-
-    /** Numeric-component version compare: {@code >0} when {@code a} is newer than {@code b}. */
-    static int compareVersions(String a, String b) {
-        String[] pa = a.replaceAll("[^0-9.]", " ").trim().split("[.\\s]+");
-        String[] pb = b.replaceAll("[^0-9.]", " ").trim().split("[.\\s]+");
-        for (int i = 0; i < Math.max(pa.length, pb.length); i++) {
-            int x = i < pa.length ? parseIntSafe(pa[i]) : 0;
-            int y = i < pb.length ? parseIntSafe(pb[i]) : 0;
-            if (x != y) return Integer.compare(x, y);
-        }
-        return 0;
-    }
-
-    private static int parseIntSafe(String s) {
-        try {
-            return Integer.parseInt(s);
-        } catch (NumberFormatException e) {
-            return 0;
         }
     }
 
@@ -1228,10 +1208,12 @@ public final class LauncherWindow {
                     }
                     Map<String, ExchangeHandler> handlers = new java.util.HashMap<>();
                     if (useProxy) {
-                        // Launcher-managed module jars follow the selected game version; jars the
-                        // user placed by hand are never touched. Never throws, logs what it swaps.
+                        // Launcher-managed module jars follow the selected game version and the
+                        // protocol of the proxy being started; jars the user placed by hand are
+                        // never touched. Never throws, logs what it swaps.
                         meridian.launcher.modules.ManagedModules.syncAll(
-                                proxyJar.getParent(), version, this::appendAsync);
+                                proxyJar.getParent(), version,
+                                meridian.launcher.launch.ProxyBuild.crcOf(proxyJar), this::appendAsync);
                         proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
                         // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
                         // the player token, and announce a route for each server as the listing is

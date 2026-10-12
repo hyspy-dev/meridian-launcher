@@ -33,6 +33,7 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 
+import meridian.launcher.modules.ManagedModules;
 import meridian.launcher.modules.ModuleCatalog;
 import meridian.launcher.modules.ModuleCatalog.CatalogModule;
 import meridian.launcher.modules.ModuleCatalog.CatalogVersion;
@@ -76,6 +77,12 @@ public final class ModulesPanel extends JPanel {
     /** One row per module, from either source (see {@link Row}). */
     private List<Row> installed = List.of();
     private boolean refreshing;
+    /** The Installed column that holds the Update button. */
+    private static final int UPDATE_COLUMN = 6;
+    /** What Update would install, per managed module's repo; empty until the catalog is in. */
+    private Map<String, ManagedModules.Update> updates = Map.of();
+    /** An update is running - one at a time, so a double click does not download twice. */
+    private volatile boolean updating;
 
     /**
      * A row of the Installed table. Modules reach a scope two ways: the user drops a jar into
@@ -164,7 +171,7 @@ public final class ModulesPanel extends JPanel {
 
     private JPanel buildInstalled() {
         installedModel = new DefaultTableModel(
-                new String[]{"On", "Name", "Version", "Kind", "From", "Depends on"}, 0) {
+                new String[]{"On", "Name", "Version", "Kind", "From", "Depends on", "Update"}, 0) {
             @Override public boolean isCellEditable(int r, int c) { return c == 0; }
             @Override public Class<?> getColumnClass(int c) { return c == 0 ? Boolean.class : String.class; }
         };
@@ -176,7 +183,23 @@ public final class ModulesPanel extends JPanel {
         installedTable.getColumnModel().getColumn(3).setPreferredWidth(110);   // Kind
         installedTable.getColumnModel().getColumn(4).setMaxWidth(70);          // From
         installedTable.getColumnModel().getColumn(5).setPreferredWidth(180);   // Depends on
+        installedTable.getColumnModel().getColumn(UPDATE_COLUMN).setPreferredWidth(90);
+        installedTable.getColumnModel().getColumn(UPDATE_COLUMN).setMaxWidth(110);
         center(installedTable, 1, 2, 4);   // Name + Version + From centred
+        // The Update cell is drawn as a button and acts on a click - simpler than an editor, and
+        // a click is all it takes.
+        installedTable.getColumnModel().getColumn(UPDATE_COLUMN).setCellRenderer(new UpdateCell());
+        installedTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                int row = installedTable.rowAtPoint(e.getPoint());
+                int column = installedTable.columnAtPoint(e.getPoint());
+                if (row >= 0 && column >= 0
+                        && installedTable.convertColumnIndexToModel(column) == UPDATE_COLUMN) {
+                    updateRow(row);
+                }
+            }
+        });
 
         JPanel titleBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
         titleBar.setBackground(BG);
@@ -357,19 +380,37 @@ public final class ModulesPanel extends JPanel {
             rows.sort((a, b) -> a.name().compareToIgnoreCase(b.name()));
             installed = List.copyOf(rows);
 
+            // Updates are judged against the catalog once it is in; until then the column is
+            // empty, and it fills in when the catalog arrives (loadAvailable reloads this).
+            String gv = gameVersion.get();
+            ModuleCatalog.Catalog known = catalog.cached();
+            Map<String, ManagedModules.Update> found = new java.util.HashMap<>();
+            for (Row r : installed) {
+                if (!r.isManaged()) continue;   // a jar in the folder is the user's to update
+                ManagedModules.Update u = ManagedModules.updateFor(r.managed(), known, gv);
+                if (u != null) found.put(r.managed().repo(), u);
+            }
+            updates = found;
+
             installedModel.setRowCount(0);
             for (Row r : installed) {
                 String version;
                 String kind;
                 String depends = "";
+                String update = "";
                 if (r.isManaged()) {
                     // One row per module even when several per-line builds are installed; the
-                    // proxy loads whichever matches its protocol.
+                    // proxy loads whichever matches its protocol, so that is the version shown.
                     var builds = r.managed().builds();
-                    version = builds.isEmpty() ? "" : builds.get(0).version();
+                    version = builds.isEmpty() ? "" : builds.stream()
+                            .filter(b -> b.game() == null
+                                    || ManagedModules.matchesGame(List.of(b.game()), gv))
+                            .findFirst().orElse(builds.get(0)).version();
                     boolean layer1 = builds.stream().anyMatch(b -> b.requiresProtocol());
                     kind = (layer1 ? "Layer 1" : "Layer 2")
                             + (builds.size() > 1 ? " · " + builds.size() + " builds" : "");
+                    ManagedModules.Update u = updates.get(r.managed().repo());
+                    if (u != null) update = "↑ " + u.version() + (u.incompatible() ? " !" : "");
                 } else {
                     ModuleManifest mf = r.jar().manifest();
                     version = mf != null && mf.version() != null ? mf.version() : "";
@@ -377,10 +418,12 @@ public final class ModulesPanel extends JPanel {
                     if (mf != null && mf.dependsOn() != null) depends = String.join(", ", mf.dependsOn().keySet());
                 }
                 installedModel.addRow(new Object[]{r.enabled(), r.name(), version, kind,
-                        r.isManaged() ? "launcher" : "folder", depends});
+                        r.isManaged() ? "launcher" : "folder", depends, update});
             }
             long on = installed.stream().filter(Row::enabled).count();
-            setStatus(MUTED, installed.size() + " module(s), " + on + " enabled · " + scope);
+            setStatus(MUTED, installed.size() + " module(s), " + on + " enabled"
+                    + (updates.isEmpty() ? "" : " · " + updates.size() + " update(s) available")
+                    + " · " + scope);
         } finally {
             refreshing = false;
         }
@@ -403,6 +446,65 @@ public final class ModulesPanel extends JPanel {
         } catch (Exception ex) {
             setStatus(RED, "Toggle failed: " + ex.getMessage());
             reloadInstalled();
+        }
+    }
+
+    /** The Update button of a row: every outdated line of the module, to its newest build. */
+    private void updateRow(int row) {
+        if (updating || row < 0 || row >= installed.size()) return;
+        Row r = installed.get(row);
+        ManagedModules.Update u = r.isManaged() ? updates.get(r.managed().repo()) : null;
+        if (u == null) return;
+        updating = true;
+        Path scopeFolder = currentScopeFolder();
+        String repo = r.managed().repo();
+        setStatus(MUTED, "Updating " + r.name() + " to " + u.version() + "…");
+        Thread.startVirtualThread(() -> {
+            try {
+                ManagedModules.update(scopeFolder, repo, u, catalog);   // verifies sha256
+                SwingUtilities.invokeLater(() -> {
+                    updating = false;
+                    reloadInstalled();
+                    setStatus(GREEN, "Updated " + r.name() + " to " + u.version());
+                });
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    updating = false;
+                    setStatus(RED, "Update failed: " + ex.getMessage());
+                });
+            }
+        });
+    }
+
+    /** Draws the Update cell as a button when there is something to update, else as nothing. */
+    private final class UpdateCell implements javax.swing.table.TableCellRenderer {
+        private final JButton button = new JButton();
+        private final JLabel none = new JLabel();
+        private final Color normal = button.getForeground();
+
+        UpdateCell() {
+            button.setFocusPainted(false);
+            button.setMargin(new java.awt.Insets(0, 6, 0, 6));
+            none.setOpaque(true);
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value, boolean selected,
+                                                       boolean focused, int row, int column) {
+            String text = value == null ? "" : value.toString();
+            if (text.isEmpty()) {
+                none.setBackground(selected ? table.getSelectionBackground() : table.getBackground());
+                return none;
+            }
+            Row r = row < installed.size() ? installed.get(row) : null;
+            ManagedModules.Update u = r != null && r.isManaged() ? updates.get(r.managed().repo()) : null;
+            boolean refused = u != null && u.incompatible();
+            button.setText(text);
+            button.setForeground(refused ? RED : normal);
+            button.setToolTipText(refused
+                    ? "The installed build is cut for an older protocol - the proxy skips it until updated"
+                    : u == null ? null : "Install " + u.version() + " from the catalog");
+            return button;
         }
     }
 
@@ -475,7 +577,10 @@ public final class ModulesPanel extends JPanel {
                                 m.name() != null ? m.name() : m.repo(),
                                 m.description() == null ? "" : m.description()});
                     }
-                    setStatus(GREEN, list.size() + " module(s) — click one to pick a version.");
+                    reloadInstalled();   // the catalog is in: what is installed can be judged now
+                    setStatus(GREEN, list.size() + " module(s)"
+                            + (updates.isEmpty() ? "" : " · " + updates.size() + " update(s) available")
+                            + " — click one to pick a version.");
                     browseButton.setEnabled(true);
                     clearDetail();
                 });
