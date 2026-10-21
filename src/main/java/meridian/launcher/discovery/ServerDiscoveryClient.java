@@ -1,7 +1,8 @@
 package meridian.launcher.discovery;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 
 import java.io.IOException;
 import java.net.URI;
@@ -107,9 +108,19 @@ public final class ServerDiscoveryClient {
             throw new IOException("server-discovery " + sort + " returned HTTP "
                     + response.statusCode() + ": " + trim(response.body()));
         }
-        List<ServerListing> listings = GSON.fromJson(
-                response.body(), new TypeToken<List<ServerListing>>() {}.getType());
-        return listings != null ? listings : List.of();
+        JsonElement body = JsonParser.parseString(response.body());
+        if (body.isJsonNull()) {
+            return List.of();
+        }
+        // Parse entry by entry so each listing keeps its received object (see ServerListing.raw).
+        List<ServerListing> listings = new java.util.ArrayList<>();
+        for (JsonElement entry : body.getAsJsonArray()) {
+            ServerListing s = GSON.fromJson(entry, ServerListing.class);
+            if (s == null) continue;
+            if (entry.isJsonObject()) s.raw = entry.getAsJsonObject();
+            listings.add(s);
+        }
+        return listings;
     }
 
     private static String bearer(String token) {

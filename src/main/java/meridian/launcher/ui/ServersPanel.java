@@ -83,6 +83,9 @@ public final class ServersPanel extends JPanel {
     private JTextField detailOwner;
     private JLabel detailRegions;
     private JTextArea detailDesc;
+    private ServerImagePreview detailImage;
+    private JButton copyRawButton;
+    private ServerListing selected;   // the server the detail panel shows, null when none
 
     private ServerDiscoveryClient.Sort current = ServerDiscoveryClient.Sort.RANDOM;
     private volatile boolean busy;
@@ -171,7 +174,10 @@ public final class ServersPanel extends JPanel {
         onListChanged();   // set version enablement for the default list
     }
 
-    /** The panel below the table showing the selected server's description, regions and owner. */
+    /**
+     * The panel below the table showing the selected server's banner, description, regions and
+     * owner, with a "Copy raw" button for the entry's JSON as the service sent it.
+     */
     private JPanel buildDetail() {
         JPanel header = new JPanel();
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
@@ -179,7 +185,16 @@ public final class ServersPanel extends JPanel {
         detailName = new JLabel();
         detailName.setForeground(FG);
         detailName.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
-        detailName.setAlignmentX(Component.LEFT_ALIGNMENT);
+        copyRawButton = new JButton("Copy raw");
+        copyRawButton.setFocusPainted(false);
+        copyRawButton.setToolTipText("Copy this server's JSON as server-discovery returned it (all fields, formatted)");
+        copyRawButton.addActionListener(e -> copyRaw());
+        JPanel nameRow = new JPanel(new BorderLayout(8, 0));
+        nameRow.setBackground(BG);
+        nameRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        nameRow.add(detailName, BorderLayout.CENTER);
+        nameRow.add(copyRawButton, BorderLayout.EAST);
+        nameRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, nameRow.getPreferredSize().height));
         // Owner uuid on its own row: a "Owner:" label + a read-only-but-selectable field so the
         // uuid can be highlighted and copied with the mouse.
         JPanel ownerRow = new JPanel();
@@ -193,7 +208,7 @@ public final class ServersPanel extends JPanel {
         ownerRow.add(detailOwner);
 
         detailRegions = infoLabel();
-        header.add(detailName);
+        header.add(nameRow);
         header.add(Box.createVerticalStrut(3));
         header.add(ownerRow);
         header.add(detailRegions);
@@ -210,13 +225,25 @@ public final class ServersPanel extends JPanel {
         descScroll.setBorder(BorderFactory.createLineBorder(BAR));
         descScroll.getViewport().setBackground(new Color(18, 18, 18));
 
-        JPanel panel = new JPanel(new BorderLayout(0, 6));
+        detailImage = new ServerImagePreview(browserOpener);
+        JPanel body = new JPanel(new BorderLayout(8, 0));
+        body.setBackground(BG);
+        body.add(detailImage, BorderLayout.WEST);
+        body.add(descScroll, BorderLayout.CENTER);
+
+        JPanel panel = new JPanel(new BorderLayout(0, 6)) {
+            // Tall enough for the header plus the full banner box; measured live because the
+            // header's labels are empty until clearDetail() fills them.
+            @Override public Dimension getPreferredSize() {
+                return new Dimension(0, 8 + header.getPreferredSize().height + 6
+                        + ServerImagePreview.BOX_HEIGHT);
+            }
+        };
         panel.setBackground(BG);
         panel.setBorder(BorderFactory.createEmptyBorder(8, 2, 0, 2));
         panel.add(header, BorderLayout.NORTH);
-        panel.add(descScroll, BorderLayout.CENTER);
+        panel.add(body, BorderLayout.CENTER);
         panel.setMinimumSize(new Dimension(0, 96));
-        panel.setPreferredSize(new Dimension(0, 150));
         return panel;
     }
 
@@ -243,6 +270,9 @@ public final class ServersPanel extends JPanel {
     }
 
     private void showDetail(ServerListing s) {
+        selected = s;
+        copyRawButton.setEnabled(s.raw != null);
+        detailImage.show(s.imageUrl);
         detailName.setText(s.name == null || s.name.isBlank() ? "(unnamed server)" : s.name);
         detailOwner.setText(s.ownerProfileId == null || s.ownerProfileId.isBlank() ? "—" : s.ownerProfileId);
         String regions = s.regionNames();
@@ -253,6 +283,9 @@ public final class ServersPanel extends JPanel {
     }
 
     private void clearDetail() {
+        selected = null;
+        copyRawButton.setEnabled(false);
+        detailImage.clear();
         detailName.setText("No server selected");
         detailOwner.setText(" ");
         detailRegions.setText(" ");
@@ -267,10 +300,23 @@ public final class ServersPanel extends JPanel {
         int m = table.convertRowIndexToModel(row);
         if (m < 0 || m >= listings.size()) return;
         String address = listings.get(m).endpoint();
+        copyToClipboard(address, "Copied " + address + " to clipboard");
+    }
+
+    /** Copies the selected server's received JSON object (pretty-printed) to the clipboard. */
+    private void copyRaw() {
+        ServerListing s = selected;
+        String json = s == null ? null : s.rawJson();
+        if (json == null) return;
+        String name = s.name == null || s.name.isBlank() ? s.endpoint() : s.name;
+        copyToClipboard(json, "Copied raw JSON of " + name + " to clipboard");
+    }
+
+    private void copyToClipboard(String text, String done) {
         try {
             Toolkit.getDefaultToolkit().getSystemClipboard()
-                    .setContents(new StringSelection(address), null);
-            setStatus(GREEN, "Copied " + address + " to clipboard");
+                    .setContents(new StringSelection(text), null);
+            setStatus(GREEN, done);
         } catch (Exception ex) {
             setStatus(RED, "Couldn't copy to clipboard: " + ex.getMessage());
         }

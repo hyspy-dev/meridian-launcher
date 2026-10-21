@@ -1,5 +1,9 @@
 package meridian.launcher.discovery;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -11,6 +15,9 @@ import java.util.List;
  * <p>{@code serverType} and {@code regions} arrive as numeric codes (the service sends integers,
  * which Gson coerces into these String fields); {@link #typeName()} / {@link #regionNames()} map
  * them to display names, falling back to the raw value if a code is ever out of range.
+ *
+ * <p>{@link #raw} keeps the entry exactly as the service sent it, so fields this class doesn't
+ * model yet are not lost — {@link #rawJson()} is what the browser's "Copy raw" hands out.
  */
 public final class ServerListing {
     public String uuid;
@@ -27,6 +34,16 @@ public final class ServerListing {
     public boolean isLiked;
     public boolean isFavorited;
     public List<String> regions;
+    /** Banner shown in the game's browser (a public PNG on the UGC CDN); absent on some servers. */
+    public String imageUrl;
+
+    /** The entry as received; transient, so Gson leaves it out of the field mapping. */
+    public transient JsonObject raw;
+
+    private static final Gson PRETTY = new GsonBuilder()
+            .setPrettyPrinting()
+            .disableHtmlEscaping()
+            .create();
 
     /** Single server-type code → name (index = code). */
     private static final String[] TYPES = {
@@ -37,6 +54,11 @@ public final class ServerListing {
     private static final String[] REGIONS = {
             "NA East", "NA West", "South America", "EU West", "EU Central",
             "EU East", "Middle East", "Asia East", "Asia Southeast", "Oceania"};
+
+    /** The received entry pretty-printed (original field order and values), or null if not kept. */
+    public String rawJson() {
+        return raw == null ? null : PRETTY.toJson(raw);
+    }
 
     public String endpoint() {
         return (host == null ? "?" : host) + ":" + port;
