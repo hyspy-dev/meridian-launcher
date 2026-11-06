@@ -80,6 +80,15 @@ public final class HytaleAuth {
      */
     public ProfileList listProfiles(String refreshToken) throws IOException, InterruptedException {
         Tokens tokens = accessTokenFrom(refreshToken);
+        return new ProfileList(profilesWith(tokens.accessToken()), tokens.refreshToken());
+    }
+
+    /**
+     * The account's profiles, with an access token already in hand - so a caller can store the
+     * rotated refresh token first, and a failure here does not lose it.
+     */
+    public List<Profile> profilesWith(String accessToken) throws IOException, InterruptedException {
+        Tokens tokens = new Tokens(accessToken, null);
         HttpResponse<String> resp = send(HttpRequest.newBuilder(
                         URI.create(HytaleEndpoints.ACCOUNT_DATA_BASE
                                 + "/my-account/get-launcher-data?arch=amd64&os=windows"))
@@ -88,9 +97,17 @@ public final class HytaleAuth {
                 .GET());
         requireSuccess(resp, "fetch launcher data");
         AuthDtos.LauncherData data = GSON.fromJson(resp.body(), AuthDtos.LauncherData.class);
-        List<Profile> profiles = (data == null || data.profiles == null) ? List.of()
+        return (data == null || data.profiles == null) ? List.of()
                 : data.profiles.stream().map(p -> new Profile(p.uuid, p.username)).toList();
-        return new ProfileList(profiles, tokens.refreshToken());
+    }
+
+    /**
+     * game-session/new for one profile, with an access token already in hand (see
+     * {@link #profilesWith}); {@code refreshToken} is carried onto the session as the one to keep.
+     */
+    public GameSession mintWith(String accessToken, String uuid, String username, String refreshToken)
+            throws IOException, InterruptedException {
+        return mintGameSession(accessToken, uuid, username, refreshToken);
     }
 
     /**

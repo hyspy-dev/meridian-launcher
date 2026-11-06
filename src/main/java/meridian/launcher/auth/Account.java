@@ -18,6 +18,12 @@ public final class Account {
     /** Last minted session (for {@link #session}'s profile); may be expired — check before reuse. */
     public GameSession session;
     /**
+     * The last session minted for each profile, by profile uuid. Sessions live per profile: a mint
+     * for one leaves the others' running windows alone, but a second mint for the same profile
+     * ends its first. Keeping each one is what lets a profile's next window reuse it.
+     */
+    public java.util.Map<String, GameSession> sessions;
+    /**
      * Every profile on this account (distinct in-game identity {@code {uuid, username}}).
      * Usually one; an account with several appears as several rows in the picker. Filled
      * from get-launcher-data at add time.
@@ -43,12 +49,28 @@ public final class Account {
                 && TokenExpiry.isValid(session.identityToken);
     }
 
-    /** True when the stored session is for {@code profileUuid} and not near expiry. */
+    /** True when a session for {@code profileUuid} is stored and not near expiry. */
     public boolean hasValidSessionFor(String profileUuid) {
-        return session != null && session.isUsable()
-                && profileUuid != null && profileUuid.equals(session.profileUuid)
-                && TokenExpiry.isValid(session.sessionToken)
-                && TokenExpiry.isValid(session.identityToken);
+        GameSession s = sessionFor(profileUuid);
+        return s != null && s.isUsable()
+                && TokenExpiry.isValid(s.sessionToken)
+                && TokenExpiry.isValid(s.identityToken);
+    }
+
+    /** The stored session for {@code profileUuid}, or null. */
+    public GameSession sessionFor(String profileUuid) {
+        if (profileUuid == null) return null;
+        if (sessions != null && sessions.get(profileUuid) != null) return sessions.get(profileUuid);
+        return session != null && profileUuid.equals(session.profileUuid) ? session : null;
+    }
+
+    /** Stores {@code fresh} as its profile's session, and as the last one. */
+    public void storeSession(GameSession fresh) {
+        session = fresh;
+        if (fresh != null && fresh.profileUuid != null) {
+            if (sessions == null) sessions = new java.util.LinkedHashMap<>();
+            sessions.put(fresh.profileUuid, fresh);
+        }
     }
 
     /** The profiles to show for this account — the stored list, or a single fallback. */

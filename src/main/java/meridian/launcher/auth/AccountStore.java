@@ -134,6 +134,9 @@ public final class AccountStore {
                 Data d = GSON.fromJson(new String(json, StandardCharsets.UTF_8), Data.class);
                 if (d != null) {
                     if (d.accounts == null) d.accounts = new LinkedHashMap<>();
+                    if (mergeSplitLogins(d)) {
+                        save(d);
+                    }
                     return d;
                 }
             } catch (Exception e) {
@@ -186,6 +189,60 @@ public final class AccountStore {
             log.warn("Legacy session migration failed: {}", e.toString());
         }
         return d;
+    }
+
+    /**
+     * Folds together entries that are one login split in two. Older builds re-keyed an account by
+     * the profile last launched, so a login with several profiles could end up stored twice: the
+     * newer entry with the live refresh token, the older with a dead one. Entries listing the same
+     * profiles are one login; the most recently used is kept, under its first profile's uuid.
+     *
+     * @return whether anything changed
+     */
+    static boolean mergeSplitLogins(Data d) {
+        Map<String, Account> byLogin = new LinkedHashMap<>();
+        boolean changed = false;
+        for (Account a : new ArrayList<>(d.accounts.values())) {
+            if (a.profiles == null || a.profiles.isEmpty()) {
+                byLogin.put("id:" + a.id, a);
+                continue;
+            }
+            java.util.TreeSet<String> uuids = new java.util.TreeSet<>();
+            for (HytaleAuth.Profile p : a.profiles) {
+                uuids.add(p.uuid());
+            }
+            String key = String.join(",", uuids);
+            Account seen = byLogin.get(key);
+            if (seen == null || a.lastUsedAt > seen.lastUsedAt) {
+                byLogin.put(key, a);
+            }
+            if (seen != null) {
+                changed = true;
+            }
+        }
+        Map<String, Account> merged = new LinkedHashMap<>();
+        for (Account a : byLogin.values()) {
+            if (a.profiles != null && !a.profiles.isEmpty()) {
+                String first = a.profiles.get(0).uuid();
+                if (first != null && !first.equals(a.id)) {
+                    if (a.id != null && a.id.equals(d.activeId)) {
+                        d.activeId = first;
+                    }
+                    a.id = first;
+                    a.username = a.profiles.get(0).username();
+                    changed = true;
+                }
+            }
+            merged.put(a.id, a);
+        }
+        if (changed) {
+            if (d.activeId != null && !merged.containsKey(d.activeId)) {
+                d.activeId = merged.isEmpty() ? null : merged.keySet().iterator().next();
+            }
+            d.accounts = merged;
+            log.info("Merged a login stored under several entries into one ({} account(s) now)", merged.size());
+        }
+        return changed;
     }
 
     private void save(Data d) {

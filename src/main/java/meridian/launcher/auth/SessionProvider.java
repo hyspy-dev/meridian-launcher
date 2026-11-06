@@ -68,15 +68,11 @@ public final class SessionProvider {
                 continue;
             }
             try {
-                HytaleAuth.ProfileList result = auth.listProfiles(a.refreshToken);
+                // The refresh rotates the token server-side: the new one is stored before
+                // anything else can fail, or the account is lost (invalid_grant next time).
+                HytaleAuth.Access access = rotate(a);
                 boolean dirty = false;
-                // The refresh rotated the token server-side — persist the new one or the next
-                // refresh/mint fails with invalid_grant.
-                if (result.refreshToken() != null && !result.refreshToken().equals(a.refreshToken)) {
-                    a.refreshToken = result.refreshToken();
-                    dirty = true;
-                }
-                List<HytaleAuth.Profile> fresh = result.profiles();
+                List<HytaleAuth.Profile> fresh = auth.profilesWith(access.accessToken());
                 if (fresh != null && !fresh.isEmpty() && !fresh.equals(a.profiles)) {
                     a.profiles = fresh;
                     dirty = true;
@@ -108,12 +104,7 @@ public final class SessionProvider {
             throw new IOException("Account " + account.displayName()
                     + " has no refresh token — sign in again to download updates.");
         }
-        HytaleAuth.Access access = auth.access(account.refreshToken);
-        if (access.refreshToken() != null && !access.refreshToken().equals(account.refreshToken)) {
-            account.refreshToken = access.refreshToken();
-            store.update(account);
-        }
-        return access.accessToken();
+        return rotate(account).accessToken();
     }
 
     /** Every profile across every account, most-recently-used account first — for the picker. */
@@ -177,17 +168,19 @@ public final class SessionProvider {
     private GameSession acquireFor(Account account, String profileUuid, String username,
                                    Consumer<String> browserOpener)
             throws IOException, InterruptedException {
-        if (account.hasValidSessionFor(profileUuid)
-                && auth.isSessionLive(account.session.sessionToken)) {
+        GameSession stored = account.sessionFor(profileUuid);
+        if (account.hasValidSessionFor(profileUuid) && auth.isSessionLive(stored.sessionToken)) {
             log.info("Reusing live session for {} (no mint — other windows stay authenticated).",
-                    account.session.profileUsername);
+                    stored.profileUsername);
+            account.session = stored;
             store.recordUse(account);
-            return account.session;
+            return stored;
         }
 
         if (account.refreshToken != null) {
             log.info("Minting a fresh session for {} · {}.", account.displayName(), username);
-            GameSession fresh = auth.mintForProfile(account.refreshToken, profileUuid, username);
+            HytaleAuth.Access access = rotate(account);
+            GameSession fresh = auth.mintWith(access.accessToken(), profileUuid, username, account.refreshToken);
             updateAccount(account, fresh);
             return fresh;
         }
@@ -229,11 +222,29 @@ public final class SessionProvider {
         store.setActive(accountId);
     }
 
+    /**
+     * Stores a fresh session on its account. The account keeps its key and name - they are the
+     * login's (its first profile), not the profile just launched. Re-keying it here once filed the
+     * rotated refresh token under a second entry and left the old one behind with the dead token;
+     * picking that one used a rotated token again, which the account service answers by revoking
+     * the whole login - every profile signed out.
+     */
     private void updateAccount(Account account, GameSession fresh) {
-        account.session = fresh;
+        account.storeSession(fresh);
         if (fresh.refreshToken != null) account.refreshToken = fresh.refreshToken;
-        if (fresh.profileUsername != null) account.username = fresh.profileUsername;
-        if (fresh.profileUuid != null) account.id = fresh.profileUuid;
         store.recordUse(account);
+    }
+
+    /**
+     * Refreshes the account's access and stores the rotated refresh token at once - before the
+     * caller does anything that could fail with the old one already dead.
+     */
+    private HytaleAuth.Access rotate(Account account) throws IOException, InterruptedException {
+        HytaleAuth.Access access = auth.access(account.refreshToken);
+        if (access.refreshToken() != null && !access.refreshToken().equals(account.refreshToken)) {
+            account.refreshToken = access.refreshToken();
+            store.update(account);
+        }
+        return access;
     }
 }
