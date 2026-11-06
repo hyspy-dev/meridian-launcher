@@ -262,7 +262,15 @@ public final class ModulesPanel extends JPanel {
         detailUrl.setForeground(MUTED);
         detailUrl.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
 
-        detailDesc = new JTextArea(2, 20);
+        // Two lines tall whatever the text: a wrapping text area asks for more height the narrower
+        // it is laid out, and the card sizes itself from what its parts ask for.
+        detailDesc = new JTextArea(2, 20) {
+            @Override
+            public Dimension getPreferredSize() {
+                java.awt.Insets in = getInsets();
+                return new Dimension(1, getRows() * getRowHeight() + in.top + in.bottom);
+            }
+        };
         detailDesc.setEditable(false);
         detailDesc.setLineWrap(true);
         detailDesc.setWrapStyleWord(true);
@@ -303,7 +311,6 @@ public final class ModulesPanel extends JPanel {
         detail.setBackground(BG);
         detail.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
         detail.add(detailCard, BorderLayout.CENTER);
-        detail.setPreferredSize(new Dimension(0, 132));
         return detail;
     }
 
@@ -593,7 +600,14 @@ public final class ModulesPanel extends JPanel {
         });
     }
 
-    /** Shows a module's details and an install button per version — all from the catalog, no network. */
+    /** How many versions get a button of their own in the module card; older ones sit under "More". */
+    private static final int SHOWN_VERSIONS = 3;
+
+    /** One installable version as the card offers it. */
+    private record InstallChoice(String label, String tip, CatalogVersion version) {
+    }
+
+    /** Shows a module's details and install choices per version — all from the catalog, no network. */
     private void showDetail(CatalogModule module) {
         selectedRepo = module;
         detailName.setText(module.name() != null ? module.name() : module.repo());
@@ -604,29 +618,52 @@ public final class ModulesPanel extends JPanel {
         installButtons.removeAll();
         List<CatalogVersion> versions = module.versions();
         // A release version may ship one jar per game line. When the selected install's game
-        // version is known, show ONE button per version that installs the matching build; only
-        // when the game is unknown (or nothing matches) fall back to a button per line.
+        // version is known, offer ONE choice per version that installs the matching build; only
+        // when the game is unknown (or nothing matches) fall back to a choice per line.
         String gv = gameVersion.get();
         java.util.LinkedHashMap<String, List<CatalogVersion>> byVersion = new java.util.LinkedHashMap<>();
         for (CatalogVersion v : versions) {
             byVersion.computeIfAbsent(v.version(), k -> new java.util.ArrayList<>()).add(v);
         }
+        List<InstallChoice> choices = new java.util.ArrayList<>();   // catalog order: newest first
         for (Map.Entry<String, List<CatalogVersion>> e : byVersion.entrySet()) {
             List<CatalogVersion> group = e.getValue();
             CatalogVersion match = group.size() == 1 ? group.get(0)
                     : ManagedModules.buildFor(group, gv);
             if (match != null) {
                 String label = match.version() + (match.prerelease() ? " (pre)" : "");
-                JButton b = button(label, () -> install(module.repo(), match));
-                if (match.games() != null) b.setToolTipText("build for " + String.join(", ", match.games()));
-                installButtons.add(b);
+                String tip = match.games() == null ? null : "build for " + String.join(", ", match.games());
+                choices.add(new InstallChoice(label, tip, match));
             } else {
                 for (CatalogVersion v : group) {   // game unknown or unmatched: disambiguate per line
                     String line = v.games() == null || v.games().isEmpty() ? "?" : v.games().get(0);
                     String label = v.version() + (v.prerelease() ? " (pre)" : "") + " (" + line + ")";
-                    installButtons.add(button(label, () -> install(module.repo(), v)));
+                    choices.add(new InstallChoice(label, null, v));
                 }
             }
+        }
+        // The newest few as buttons; the rest behind "More", so the card keeps one row however
+        // long a module's history gets.
+        for (int i = 0; i < Math.min(SHOWN_VERSIONS, choices.size()); i++) {
+            InstallChoice c = choices.get(i);
+            JButton b = button(c.label(), () -> install(module.repo(), c.version()));
+            b.setToolTipText(c.tip());
+            installButtons.add(b);
+        }
+        if (choices.size() > SHOWN_VERSIONS) {
+            javax.swing.JPopupMenu older = new javax.swing.JPopupMenu();
+            for (InstallChoice c : choices.subList(SHOWN_VERSIONS, choices.size())) {
+                javax.swing.JMenuItem item = new javax.swing.JMenuItem(c.label());
+                item.setToolTipText(c.tip());
+                item.addActionListener(e -> install(module.repo(), c.version()));
+                older.add(item);
+            }
+            JButton more = new JButton("More ▾");
+            more.setFocusPainted(false);
+            more.setToolTipText("Older versions");
+            // Upwards: the card sits at the bottom of the window.
+            more.addActionListener(e -> older.show(more, 0, -older.getPreferredSize().height));
+            installButtons.add(more);
         }
         detailStatus.setText(versions.isEmpty() ? "no downloadable versions" : "");
         setCardSelected(true);
