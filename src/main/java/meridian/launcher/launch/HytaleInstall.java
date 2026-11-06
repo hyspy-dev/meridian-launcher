@@ -177,10 +177,18 @@ public final class HytaleInstall {
 
     /** The authenticated-launch arguments the client expects, in the launcher's order. */
     public List<String> launchArgs(String uuid, String name) {
+        return launchArgs(uuid, name, javaExec);
+    }
+
+    /**
+     * The same, with another program as {@code --java-exec} - what the client starts a
+     * single-player world's server with (see {@link SingleplayerShim}).
+     */
+    public List<String> launchArgs(String uuid, String name, Path serverJava) {
         return List.of(
                 "--app-dir", appDir.toString(),
                 "--user-dir", userDir.toString(),
-                "--java-exec", javaExec.toString(),
+                "--java-exec", serverJava.toString(),
                 "--auth-mode", "authenticated",
                 "--uuid", uuid,
                 "--name", name);

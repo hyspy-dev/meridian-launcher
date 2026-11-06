@@ -51,6 +51,16 @@ public final class GameLauncher {
      */
     public Process launch(GameSession session, Map<String, String> extraEnv, java.util.List<String> extraArgs)
             throws IOException {
+        return launch(session, extraEnv, extraArgs, null);
+    }
+
+    /**
+     * {@link #launch(GameSession, Map, java.util.List)}, with {@code serverJava} as the client's
+     * {@code --java-exec} instead of the install's java - the program it starts single-player
+     * worlds' servers with. Null keeps the install's.
+     */
+    public Process launch(GameSession session, Map<String, String> extraEnv, java.util.List<String> extraArgs,
+            Path serverJava) throws IOException {
         if (!session.isUsable()) {
             throw new IllegalArgumentException("Refusing to launch: session has no usable tokens");
         }
@@ -66,7 +76,8 @@ public final class GameLauncher {
         // with "Identity token username mismatch" — the display name can't be substituted.
         java.util.List<String> command = new java.util.ArrayList<>();
         command.add(install.executable.toString());
-        command.addAll(install.launchArgs(session.profileUuid, session.profileUsername));
+        command.addAll(install.launchArgs(session.profileUuid, session.profileUsername,
+                serverJava != null ? serverJava : install.javaExec));
         command.addAll(extraArgs);
 
         ProcessBuilder pb = new ProcessBuilder(command);

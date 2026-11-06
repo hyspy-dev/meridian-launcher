@@ -48,12 +48,26 @@ public final class ProxyLauncher {
      * {@code --no-gui}, so the proxy shows its normal window (same UI as standalone).
      */
     public static Process startMultiplex(Path proxyJar) throws IOException {
+        return startMultiplex(proxyJar, null);
+    }
+
+    /**
+     * {@link #startMultiplex(Path)}, opening the door single-player worlds join through when
+     * {@code singleplayer} is given (see {@link SingleplayerShim}).
+     */
+    public static Process startMultiplex(Path proxyJar, SingleplayerShim.Control singleplayer) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(javaExec());
         cmd.add("-jar");
         cmd.add(proxyJar.toString());
         cmd.add("--multiplex");
+        if (singleplayer != null) {
+            cmd.addAll(singleplayer.proxyArgs());
+        }
         ProcessBuilder pb = new ProcessBuilder(cmd);
+        if (singleplayer != null) {
+            pb.environment().put(SingleplayerShim.ENV_SECRET, singleplayer.secret());
+        }
         Path parent = proxyJar.getParent();
         if (parent != null) {
             pb.directory(parent.toFile());
@@ -65,7 +79,7 @@ public final class ProxyLauncher {
     }
 
     /** The JVM running the launcher — guaranteed present and compatible with the native QUIC lib. */
-    private static String javaExec() {
+    public static String javaExec() {
         String home = System.getProperty("java.home");
         boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
         String bin = windows ? "java.exe" : "java";

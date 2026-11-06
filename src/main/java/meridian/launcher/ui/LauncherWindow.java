@@ -77,6 +77,7 @@ public final class LauncherWindow {
     private javax.swing.JCheckBox useProxyCheck;
     private javax.swing.JCheckBox blockTelemetryCheck;
     private javax.swing.JCheckBox logRequestsCheck;
+    private javax.swing.JCheckBox singleplayerCheck;
 
     // Shared across concurrent game windows: the Meridian CA is trusted for as long as any window
     // is using it, and uninstalled only when the LAST such window exits (not the first to close).
@@ -102,6 +103,7 @@ public final class LauncherWindow {
     private static final String PREF_BLOCK_TELEMETRY = "blockTelemetry";
     private static final String PREF_USE_PROXY = "useProxy";
     private static final String PREF_LOG_REQUESTS = "logHttpsRequests";
+    private static final String PREF_SINGLEPLAYER = "singleplayerSupport";
     // The last selection is restored on the next start — a launcher that forgets which folder,
     // version and account you use is a launcher you have to re-configure every time.
     private static final String PREF_HYTALE_ROOT = "hytaleRoot";
@@ -621,10 +623,18 @@ public final class LauncherWindow {
         blockTelemetryCheck = checkBox("Block telemetry", PREF_BLOCK_TELEMETRY, null);
         blockTelemetryCheck.setToolTipText("Route the game through a local proxy that refuses its"
                 + " telemetry / crash-reporting hosts (" + String.join(", ", HytaleBackends.TELEMETRY) + ")");
-        useProxyCheck = checkBox("Use proxy", PREF_USE_PROXY,
-                () -> { if (proxyBox != null) proxyBox.setEnabled(useProxyCheck.isSelected()); });
+        useProxyCheck = checkBox("Use proxy", PREF_USE_PROXY, () -> {
+            if (proxyBox != null) proxyBox.setEnabled(useProxyCheck.isSelected());
+            // Single-player worlds join the proxy "Use proxy" starts, so they need it on.
+            if (singleplayerCheck != null) singleplayerCheck.setEnabled(useProxyCheck.isSelected());
+        });
         useProxyCheck.setToolTipText("Route the game's servers through the Meridian proxy: the in-game"
                 + " server list is rewritten to the local proxy, which relays to the real servers.");
+        singleplayerCheck = checkBox("Single player support", PREF_SINGLEPLAYER, null);
+        singleplayerCheck.setEnabled(useProxyCheck.isSelected());
+        singleplayerCheck.setToolTipText("<html>Play single-player worlds through the proxy too, in its"
+                + " window, with the modules in singleplayer/modules.<br>Needs Use proxy. The game starts"
+                + " each world's local server through a small script; the install is not modified.</html>");
         logRequestsCheck = checkBox("Log all HTTPS requests", PREF_LOG_REQUESTS, null);
         logRequestsCheck.setToolTipText("<html>MITM-decrypt the game's HTTPS and log every request"
                 + " — method, URL, POST body and the response — to the console and to"
@@ -671,9 +681,14 @@ public final class LauncherWindow {
         launchControls.add(boldLabel("Proxy:"));
         launchControls.add(proxyBox, "growx, wrap");
         launchControls.add(getProxyButton, "span 2, growx, wrap");
-        launchControls.add(blockTelemetryCheck, "span 2, wrap");
-        launchControls.add(useProxyCheck, "span 2, wrap");
-        launchControls.add(logRequestsCheck, "span 2");
+        // Two per row, so the cell keeps its height - the toggles grew past it once.
+        JPanel toggles = new JPanel(new java.awt.GridLayout(2, 2, 8, 0));
+        toggles.setBackground(BG);
+        toggles.add(useProxyCheck);
+        toggles.add(singleplayerCheck);
+        toggles.add(blockTelemetryCheck);
+        toggles.add(logRequestsCheck);
+        launchControls.add(toggles, "span 2, growx");
         JPanel launchCell = new JPanel(new BorderLayout(0, 10));
         launchCell.setBackground(BG);
         launchCell.setBorder(BorderFactory.createCompoundBorder(
@@ -1201,6 +1216,7 @@ public final class LauncherWindow {
         boolean blockTelemetry = blockTelemetryCheck.isSelected();
         boolean useProxy = useProxyCheck.isSelected();
         boolean logHttps = logRequestsCheck.isSelected();
+        boolean singleplayer = useProxy && singleplayerCheck.isSelected();
         Path proxyJar = selectedProxyJar();
         String gv = HytaleRoot.gameVersion(install.root, install.version);
         final String version = gv != null ? gv : install.version;
@@ -1218,6 +1234,7 @@ public final class LauncherWindow {
             CertificateAuthority captureCa = null;
             boolean usedCa = false;
             Process proxyProcess = null;
+            meridian.launcher.launch.SingleplayerShim.Control spControl = null;
             meridian.launcher.launch.ProxyControl proxyControl = null;
             try {
                 // Reuses the stored token when still valid, so launching another window
@@ -1257,7 +1274,11 @@ public final class LauncherWindow {
                         meridian.launcher.modules.ManagedModules.syncAll(
                                 proxyJar.getParent(), version,
                                 meridian.launcher.launch.ProxyBuild.crcOf(proxyJar), this::appendAsync);
-                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar);
+                        // Single-player worlds join this same proxy, through a door chosen now.
+                        if (singleplayer && meridian.launcher.launch.SingleplayerShim.supports(proxyJar)) {
+                            spControl = meridian.launcher.launch.SingleplayerShim.Control.create();
+                        }
+                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar, spControl);
                         // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
                         // the player token, and announce a route for each server as the listing is
                         // rewritten - and for each minigame server matchmaking assigns.
@@ -1299,8 +1320,26 @@ public final class LauncherWindow {
                     appendAsync("Telemetry blocking on — refusing " + HytaleBackends.TELEMETRY);
                 }
 
+                // Single-player worlds: the client starts their servers through our script,
+                // which puts the proxy in front. An older proxy has no such mode - then the worlds
+                // run as usual rather than failing to boot.
+                Path serverJava = null;
+                if (singleplayer) {
+                    if (spControl != null) {
+                        serverJava = meridian.launcher.launch.SingleplayerShim.write();
+                        Map<String, String> withShim = new java.util.HashMap<>(env);
+                        withShim.putAll(meridian.launcher.launch.SingleplayerShim.env(proxyJar, install, spControl));
+                        env = withShim;
+                        appendAsync("Single player support ON — worlds play in the proxy's window"
+                                + " (modules: singleplayer/modules).");
+                    } else {
+                        appendAsync("Single player support: " + proxyJar.getFileName()
+                                + " predates it — single-player worlds run without the proxy.");
+                    }
+                }
+
                 appendAsync("Launching " + install.version + " as " + s.profileUsername);
-                Process p = new GameLauncher(install).launch(s, env, List.of());
+                Process p = new GameLauncher(install).launch(s, env, List.of(), serverJava);
                 appendAsync("Client started (pid " + p.pid() + ").");
                 setStatusAsync(GREEN, "Playing as " + s.profileUsername);
                 SwingUtilities.invokeLater(this::reloadAccounts);
