@@ -1278,7 +1278,7 @@ public final class LauncherWindow {
                         // slot: single-player worlds join through it, and local tools find it.
                         int basePort = RouteRegistry.allocateBasePort();
                         controlPort = meridian.launcher.launch.ProxyControlPort.create(basePort);
-                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar, controlPort);
+                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar, controlPort, install);
                         // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
                         // the player token, and announce a route for each server as the listing is
                         // rewritten - and for each minigame server matchmaking assigns.

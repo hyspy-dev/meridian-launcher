@@ -56,6 +56,16 @@ public final class ProxyLauncher {
      * single-player worlds and local tools reach it (see {@link ProxyControlPort}).
      */
     public static Process startMultiplex(Path proxyJar, ProxyControlPort control) throws IOException {
+        return startMultiplex(proxyJar, control, null);
+    }
+
+    /**
+     * {@link #startMultiplex(Path, ProxyControlPort)}, telling the proxy which build it serves:
+     * its game folder and the game's user folder ({@code --game-dir}, {@code --user-dir}) - where
+     * core reads the game's own files from, so no module has to carry any.
+     */
+    public static Process startMultiplex(Path proxyJar, ProxyControlPort control, HytaleInstall install)
+            throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(javaExec());
         cmd.add("-jar");
@@ -63,6 +73,16 @@ public final class ProxyLauncher {
         cmd.add("--multiplex");
         if (control != null) {
             cmd.addAll(control.proxyArgs());
+        }
+        if (install != null) {
+            if (install.appDir != null) {
+                cmd.add("--game-dir");
+                cmd.add(install.appDir.toString());
+            }
+            if (install.userDir != null) {
+                cmd.add("--user-dir");
+                cmd.add(install.userDir.toString());
+            }
         }
         ProcessBuilder pb = new ProcessBuilder(cmd);
         if (control != null) {
