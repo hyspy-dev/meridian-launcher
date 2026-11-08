@@ -52,21 +52,21 @@ public final class ProxyLauncher {
     }
 
     /**
-     * {@link #startMultiplex(Path)}, opening the door single-player worlds join through when
-     * {@code singleplayer} is given (see {@link SingleplayerShim}).
+     * {@link #startMultiplex(Path)}, with its command channel on {@code control} - where
+     * single-player worlds and local tools reach it (see {@link ProxyControlPort}).
      */
-    public static Process startMultiplex(Path proxyJar, SingleplayerShim.Control singleplayer) throws IOException {
+    public static Process startMultiplex(Path proxyJar, ProxyControlPort control) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add(javaExec());
         cmd.add("-jar");
         cmd.add(proxyJar.toString());
         cmd.add("--multiplex");
-        if (singleplayer != null) {
-            cmd.addAll(singleplayer.proxyArgs());
+        if (control != null) {
+            cmd.addAll(control.proxyArgs());
         }
         ProcessBuilder pb = new ProcessBuilder(cmd);
-        if (singleplayer != null) {
-            pb.environment().put(SingleplayerShim.ENV_SECRET, singleplayer.secret());
+        if (control != null) {
+            pb.environment().putAll(control.proxyEnv());
         }
         Path parent = proxyJar.getParent();
         if (parent != null) {

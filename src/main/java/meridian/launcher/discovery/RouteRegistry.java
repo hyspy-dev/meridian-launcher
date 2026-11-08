@@ -64,8 +64,16 @@ public final class RouteRegistry {
 
     /** A registry on its own per-instance port slot — safe for concurrent game launches. */
     public static RouteRegistry create(RouteSink sink) {
+        return new RouteRegistry(allocateBasePort(), sink);
+    }
+
+    /**
+     * The first port of a fresh slot - taken before the proxy starts, so its command channel can
+     * sit on that number, then given to {@link #RouteRegistry(int, RouteSink)}.
+     */
+    public static int allocateBasePort() {
         int slot = Math.floorMod(NEXT_SLOT.getAndIncrement(), SLOTS);
-        return new RouteRegistry(DEFAULT_BASE_PORT + slot * SLOT_SIZE, sink);
+        return DEFAULT_BASE_PORT + slot * SLOT_SIZE;
     }
 
     /**

@@ -1234,7 +1234,7 @@ public final class LauncherWindow {
             CertificateAuthority captureCa = null;
             boolean usedCa = false;
             Process proxyProcess = null;
-            meridian.launcher.launch.SingleplayerShim.Control spControl = null;
+            meridian.launcher.launch.ProxyControlPort controlPort = null;
             meridian.launcher.launch.ProxyControl proxyControl = null;
             try {
                 // Reuses the stored token when still valid, so launching another window
@@ -1274,17 +1274,17 @@ public final class LauncherWindow {
                         meridian.launcher.modules.ManagedModules.syncAll(
                                 proxyJar.getParent(), version,
                                 meridian.launcher.launch.ProxyBuild.crcOf(proxyJar), this::appendAsync);
-                        // Single-player worlds join this same proxy, through a door chosen now.
-                        if (singleplayer && meridian.launcher.launch.SingleplayerShim.supports(proxyJar)) {
-                            spControl = meridian.launcher.launch.SingleplayerShim.Control.create();
-                        }
-                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar, spControl);
+                        // The proxy's command channel sits on the first port of this launch's route
+                        // slot: single-player worlds join through it, and local tools find it.
+                        int basePort = RouteRegistry.allocateBasePort();
+                        controlPort = meridian.launcher.launch.ProxyControlPort.create(basePort);
+                        proxyProcess = ProxyLauncher.startMultiplex(proxyJar, controlPort);
                         // Drive the proxy over its stdin (a parent→child pipe, not files): hand it
                         // the player token, and announce a route for each server as the listing is
                         // rewritten - and for each minigame server matchmaking assigns.
                         proxyControl = new meridian.launcher.launch.ProxyControl(proxyProcess.getOutputStream());
                         proxyControl.token(s.sessionToken);
-                        RouteRegistry routes = RouteRegistry.create(proxyControl::route);
+                        RouteRegistry routes = new RouteRegistry(basePort, proxyControl::route);
                         handlers.put("server-discovery.hytale.com", new ServerDiscoveryRewriter(store, routes));
                         matchmaking = new meridian.launcher.discovery.MatchmakingRewriter(routes, this::appendAsync);
                         handlers.put("matchmaking.hytale.com", matchmaking);
@@ -1325,10 +1325,10 @@ public final class LauncherWindow {
                 // run as usual rather than failing to boot.
                 Path serverJava = null;
                 if (singleplayer) {
-                    if (spControl != null) {
+                    if (controlPort != null && meridian.launcher.launch.SingleplayerShim.supports(proxyJar)) {
                         serverJava = meridian.launcher.launch.SingleplayerShim.write();
                         Map<String, String> withShim = new java.util.HashMap<>(env);
-                        withShim.putAll(meridian.launcher.launch.SingleplayerShim.env(proxyJar, install, spControl));
+                        withShim.putAll(meridian.launcher.launch.SingleplayerShim.env(proxyJar, install, controlPort));
                         env = withShim;
                         appendAsync("Single player support ON — worlds play in the proxy's window"
                                 + " (modules: singleplayer/modules).");

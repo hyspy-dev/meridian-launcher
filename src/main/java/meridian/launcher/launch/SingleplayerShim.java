@@ -19,8 +19,8 @@ import meridian.launcher.AppPaths;
  * game's real java and the client's whole command. The wrapper moves the server to a free port,
  * starts it with that java and every flag the client chose, and hands the world to the proxy the
  * launcher already runs: that one listens on the port the client connects to, so the world plays
- * in the same window as the servers - see the proxy's {@code SingleplayerWrap} and
- * {@code SingleplayerControl}. The two find each other through {@link Control}.
+ * in the same window as the servers - see the proxy's {@code SingleplayerWrap} and its command
+ * channel. The two find each other through {@link ProxyControlPort}.
  *
  * <p>The install is never touched: no jar is swapped, so game updates do not care. The script
  * reads where things are from the environment the client passes down to it.
@@ -34,35 +34,11 @@ public final class SingleplayerShim {
     /** The game's java, which runs the server - and the script, should the proxy be missing. */
     public static final String ENV_GAME_JAVA = "MERIDIAN_SP_GAME_JAVA";
 
-    /** Where the wrapper reaches the running proxy, {@code 127.0.0.1:<port>}. */
-    public static final String ENV_CONTROL = "MERIDIAN_SP_CONTROL";
-    /** What it says to be let in - passed to the proxy and the game alike. */
-    public static final String ENV_SECRET = "MERIDIAN_SP_SECRET";
-
-    /** The proxy class that marks a jar able to do it. */
-    private static final String WRAP_CLASS = "meridian/internal/SingleplayerControl.class";
-
-    /**
-     * The running proxy's single-player door: a loopback TCP port it listens on and a secret the
-     * wrapper must show. Chosen here, before both are started, and handed to each.
-     */
-    public record Control(int port, String secret) {
-
-        public static Control create() throws IOException {
-            int port;
-            try (java.net.ServerSocket s = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
-                port = s.getLocalPort();
-            }
-            byte[] b = new byte[24];
-            new java.security.SecureRandom().nextBytes(b);
-            return new Control(port, java.util.HexFormat.of().formatHex(b));
-        }
-
-        /** What the proxy is started with, after {@code --multiplex}. */
-        public java.util.List<String> proxyArgs() {
-            return java.util.List.of("--sp-control", Integer.toString(port));
-        }
-    }
+    /** The proxy classes that mark a jar able to take worlds: its command channel, or the older door. */
+    private static final String[] WRAP_CLASSES = {
+            "meridian/internal/control/ControlServer.class",
+            "meridian/internal/SingleplayerControl.class",
+    };
 
     private static final String WINDOWS = String.join("\r\n",
             "@echo off",
@@ -93,7 +69,12 @@ public final class SingleplayerShim {
             return false;
         }
         try (ZipFile zip = new ZipFile(proxyJar.toFile())) {
-            return zip.getEntry(WRAP_CLASS) != null;
+            for (String c : WRAP_CLASSES) {
+                if (zip.getEntry(c) != null) {
+                    return true;
+                }
+            }
+            return false;
         } catch (IOException e) {
             return false;
         }
@@ -125,15 +106,14 @@ public final class SingleplayerShim {
 
     /**
      * What the script and the wrapper read: the proxy jar, the java to run it, the game's java,
-     * and the running proxy's door.
+     * and where the running proxy's command channel is.
      */
-    public static Map<String, String> env(Path proxyJar, HytaleInstall install, Control control) {
+    public static Map<String, String> env(Path proxyJar, HytaleInstall install, ProxyControlPort control) {
         Map<String, String> m = new HashMap<>();
         m.put(ENV_PROXY_JAVA, ProxyLauncher.javaExec());
         m.put(ENV_PROXY_JAR, proxyJar.toAbsolutePath().toString());
         m.put(ENV_GAME_JAVA, install.javaExec.toString());
-        m.put(ENV_CONTROL, "127.0.0.1:" + control.port());
-        m.put(ENV_SECRET, control.secret());
+        m.putAll(control.clientEnv());
         return m;
     }
 
