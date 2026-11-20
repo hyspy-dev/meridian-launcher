@@ -41,6 +41,16 @@ public final class ProxyControl implements AutoCloseable {
         send("ROUTE " + localPort + " " + host + " " + port);
     }
 
+    /**
+     * {@code HEADLESS <identity> <name>}: the proxy was started with no game - its window's Connect
+     * joins the server picked there as this profile, the proxy playing it.
+     */
+    public synchronized void headless(String identityToken, String name) {
+        if (identityToken != null && !identityToken.isBlank() && name != null && !name.isBlank()) {
+            send("HEADLESS " + identityToken + " " + name);
+        }
+    }
+
     private void send(String line) {
         try {
             out.write(line);

@@ -89,6 +89,10 @@ public final class LauncherWindow {
     private java.io.PrintWriter httpRequestLog;
     private final Object httpRequestLogLock = new Object();
     private JButton launchButton;
+    /** Starts (and stops) a bot with no game: the proxy alone, joined as the selected profile. */
+    private JButton headlessButton;
+    /** The proxy started with no game, while it runs. */
+    private volatile Process headless;
     private JButton updateButton;
     private JLabel updateToLabel;
     private JPanel installListCell;           // grid cell #3: inline install list (blank when idle)
@@ -619,6 +623,15 @@ public final class LauncherWindow {
         launchButton.setEnabled(false);
         launchButton.setMargin(new Insets(4, 18, 4, 18));
         launchButton.addActionListener(e -> launch());
+        headlessButton = new JButton("No game");
+        headlessButton.setFocusPainted(false);
+        headlessButton.setEnabled(false);
+        headlessButton.setMargin(new Insets(4, 12, 4, 12));
+        headlessButton.setToolTipText("<html>The proxy with no game: in its window pick the server and press"
+                + " Connect - the proxy plays the selected profile there itself,<br>with that server's modules"
+                + " in its panel (the same settings and kept selection as in the game); Disconnect leaves."
+                + "<br>The account cannot be in the game on that server at the same time.</html>");
+        headlessButton.addActionListener(e -> launchHeadless());
 
         blockTelemetryCheck = checkBox("Block telemetry", PREF_BLOCK_TELEMETRY, null);
         blockTelemetryCheck.setToolTipText("Route the game through a local proxy that refuses its"
@@ -694,7 +707,11 @@ public final class LauncherWindow {
         launchCell.setBorder(BorderFactory.createCompoundBorder(
                 titledCellBorder("Launch"), BorderFactory.createEmptyBorder(8, 10, 8, 10)));
         launchCell.add(launchControls, BorderLayout.NORTH);
-        launchCell.add(launchButton, BorderLayout.SOUTH);   // BorderLayout SOUTH = pinned to bottom
+        JPanel launchRow = new JPanel(new BorderLayout(6, 0));
+        launchRow.setOpaque(false);
+        launchRow.add(launchButton, BorderLayout.CENTER);
+        launchRow.add(headlessButton, BorderLayout.EAST);
+        launchCell.add(launchRow, BorderLayout.SOUTH);   // BorderLayout SOUTH = pinned to bottom
 
         // 2×2 grid:  Game version | Account
         //            Install list | Launch
@@ -1204,6 +1221,64 @@ public final class LauncherWindow {
         }
     }
 
+    /**
+     * The proxy with no game: started as for the game (the profile's session, the managed modules,
+     * a command channel), then told it has no game - its window's Connect plays the profile on the
+     * server picked there. It runs until its window is closed.
+     */
+    private void launchHeadless() {
+        ProfileItem item = selectedItem();
+        HytaleInstall install = selectedInstall();
+        java.nio.file.Path proxyJar = selectedProxyJar();
+        if (busy || item == null || headless != null) return;
+        if (proxyJar == null) {
+            append("No proxy jar next to the launcher - with no game the proxy plays; drop a"
+                    + " meridian-proxy-*-all.jar there.");
+            return;
+        }
+        meridian.launcher.auth.Account account = item.account();
+        String gv = install == null ? null : HytaleRoot.gameVersion(install.root, install.version);
+        final String version = gv != null ? gv : install == null ? null : install.version;
+        setBusy(true, "Starting the proxy with no game for " + item.username() + "…");
+        Thread.startVirtualThread(() -> {
+            Process proxyProcess = null;
+            try {
+                GameSession s = provider.acquireProfile(account.id, item.profileUuid(), item.username(), this::openBrowser);
+                if (version != null) {
+                    meridian.launcher.modules.ManagedModules.syncAll(proxyJar.getParent(), version,
+                            meridian.launcher.launch.ProxyBuild.crcOf(proxyJar), this::appendAsync);
+                }
+                int basePort = RouteRegistry.allocateBasePort();
+                meridian.launcher.launch.ProxyControlPort controlPort =
+                        meridian.launcher.launch.ProxyControlPort.create(basePort);
+                proxyProcess = ProxyLauncher.startMultiplex(proxyJar, controlPort, install);
+                meridian.launcher.launch.ProxyControl control =
+                        new meridian.launcher.launch.ProxyControl(proxyProcess.getOutputStream());
+                control.token(s.sessionToken);
+                control.headless(s.identityToken, item.username());
+                headless = proxyProcess;
+                Process p = proxyProcess;
+                // The launcher closed first: the proxy (and the profile on the server) goes with it.
+                Runtime.getRuntime().addShutdownHook(new Thread(p::destroy, "no-game-proxy-stop"));
+                appendAsync("Proxy started with no game for " + item.username() + " - in its window pick the"
+                        + " server and press Connect.");
+                setBusyAsync(false, "Proxy with no game running");
+                SwingUtilities.invokeLater(this::updateLaunchEnabled);
+                p.waitFor();
+                appendAsync("The proxy with no game closed.");
+            } catch (Exception e) {
+                appendAsync("The proxy with no game did not start: " + e.getMessage());
+                setBusyAsync(false, "The proxy with no game did not start");
+                if (proxyProcess != null) {
+                    proxyProcess.destroy();
+                }
+            } finally {
+                headless = null;
+                SwingUtilities.invokeLater(this::updateLaunchEnabled);
+            }
+        });
+    }
+
     private void launch() {
         ProfileItem item = selectedItem();
         HytaleInstall install = selectedInstall();
@@ -1467,6 +1542,7 @@ public final class LauncherWindow {
     private void updateLaunchEnabled() {
         boolean ready = selectedAccount() != null && !busy && selectedInstall() != null;
         if (launchButton != null) launchButton.setEnabled(ready);
+        if (headlessButton != null) headlessButton.setEnabled(headless == null && ready);
         if (removeAccountButton != null) removeAccountButton.setEnabled(selectedAccount() != null && !busy);
     }
 
